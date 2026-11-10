@@ -1,0 +1,37 @@
+name: Flutter Bridge CI
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Install Dependencies
+        run: flutter pub get
+
+      - name: Verify Formatting
+        run: dart format --output=none --set-exit-if-changed .
+
+      - name: Analyze Code
+        run: dart analyze --fatal-infos
+
+      - name: Analyze Example App
+        run: flutter pub get && flutter analyze
+        working-directory: example
+
+      - name: Run Unit Tests
+        run: flutter test --coverage

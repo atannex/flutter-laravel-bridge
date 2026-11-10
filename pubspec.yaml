@@ -1,0 +1,27 @@
+name: flutter_laravel_bridge
+description: Enterprise-grade Flutter bridge for Laravel APIs, Sanctum authentication, Reverb/Pusher WebSockets, offline sync, and pagination.
+version: 2.0.0
+homepage: https://github.com/atannex/flutter-laravel-bridge
+repository: https://github.com/atannex/flutter-laravel-bridge
+issue_tracker: https://github.com/atannex/flutter-laravel-bridge/issues
+topics:
+  - laravel
+  - api
+  - authentication
+  - websocket
+  - offline
+
+environment:
+  sdk: '>=3.6.0 <4.0.0'
+  flutter: ">=3.27.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  dio: ^5.4.0
+  web_socket_channel: ^2.4.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0

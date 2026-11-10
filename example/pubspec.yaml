@@ -1,0 +1,20 @@
+name: flutter_laravel_bridge_example
+description: Demonstrates how to use the flutter_laravel_bridge package.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.6.0 <4.0.0'
+  flutter: ">=3.27.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_laravel_bridge:
+    path: ../
+  flutter_secure_storage: ^11.2.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
