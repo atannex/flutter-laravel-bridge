@@ -19,7 +19,7 @@ Welcome to the **Enterprise Laravel & Flutter Bridge Suite** documentation. This
 1. [**Architecture & Protocol Specification**](ARCHITECTURE.md)  
    Complete architectural overview, JSON envelope schemas, error codes, and sequence diagrams.
 2. [**Laravel Backend Setup Guide**](LARAVEL_SETUP.md)  
-   Step-by-step setup instructions for Laravel 10/11/12, Sanctum, Reverb, and migrations.
+   Step-by-step setup instructions for Laravel 12/13, Sanctum, Reverb, and migrations.
 3. [**Flutter Client Setup Guide**](FLUTTER_SETUP.md)  
    Client initialization, dependency configuration, and Riverpod/Bloc integration examples.
 4. [**Authentication & Token Lifecycle**](AUTHENTICATION.md)  

@@ -7,7 +7,7 @@ This guide details how to install and configure the `atannex/laravel-flutter-bri
 ## 1. Prerequisites
 
 - PHP 8.2 or higher
-- Laravel 10.x, 11.x, or 12.x
+- Laravel 12.x or 13.x (PHP 8.3+ for Laravel 13)
 - Composer 2.x
 - Laravel Sanctum (`composer require laravel/sanctum`)
 - (Optional, recommended for real-time) Laravel Reverb (`composer require laravel/reverb`)

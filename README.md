@@ -110,20 +110,6 @@ await Laravel.initialize<User>(
 );
 ```
 
-Only tokens? `tokenStorage: DelegateTokenStorage.fromKeyValue(read: …, write: …, delete: …)`
-(or `DelegateTokenStorage.fromStore(store)`); profiles: `DelegateConnectionStore.fromStore(store)`.
-`InMemoryKeyValueStore` is handy in tests.
-
-**Offline queue** (`Laravel.client.offlineQueue`): saved after every change and restored before the
-profile connects, then replayed in FIFO order once the connection is up. Payloads that are not
-JSON (e.g. `FormData` uploads) stay in memory only. A 4xx response (except 408/429) drops the
-mutation; network errors / 5xx keep it, until `maxRetries` (5) attempts. Dropped mutations are
-emitted on `offlineQueue.failures`.
-
-**Cache** (`Laravel.client.cacheManager`): write-through, restored lazily on first cached read,
-expired entries skipped, at most 200 entries (least recently used evicted),
-`invalidatePrefix('api/posts')` to drop a resource family.
-
 ---
 
 ## 🔌 Connection management
@@ -203,23 +189,6 @@ final count = await manager.revokeOtherSessions(); // "sign out all other device
 manager.commands.listen((command) { /* message, custom types… (de-duplicated by id) */ });
 ```
 
-| Server signal | Client behaviour |
-| :--- | :--- |
-| network failure / 5xx / 429 / 503 | `offline`, automatic reconnect with exponential backoff (1 s → 60 s, jitter, honours `Retry-After`); offline queue flushed once `connected` |
-| 404 `connection_not_found` on heartbeat | silently opens a new session |
-| 403 `connection_revoked` or `revoked` command | tokens cleared, `revoked`, `onSessionRevoked` |
-| 426 `upgrade_required` or `force_update` command | `upgradeRequired`, `onUpgradeRequired(LaravelUpgradeRequiredException)` |
-| 403 `app_key_required` / `invalid_app_key` / `app_suspended` | `failed` (`LaravelAppKeyException`) |
-| `logout` command | local sign-out |
-| `refresh_config` command | handshake re-run, `ServerInfo` updated |
-
-Commands arrive in heartbeat responses and — when broadcasting is enabled and the user is
-signed in — instantly on `private-flutter.connections.{id}`; both paths share one pipeline.
-
-Every request carries `X-Flutter-Bridge-Version`, `X-Flutter-App-Key` and (once connected)
-`X-Flutter-Connection-Id`, so tokens issued at login/refresh are bound to the session.
-`Laravel.client.serverClockOffset` exposes the server clock skew (from `X-Flutter-Server-Time`).
-
 ### Ready-made widgets
 
 ```dart
@@ -240,28 +209,6 @@ LaravelConnectionIndicator(manager: Laravel.connections);
 ```
 
 All widgets accept an optional `manager` and default to `Laravel.connections`.
-
-### Testing
-
-`LaravelConnectionManager` accepts `httpClientAdapterFactory` / `dioFactory`, `echoFactory`,
-`clock`, `random` and `enableTimers: false` (drive it with `connect()` / `heartbeat()`), so the
-whole protocol can be exercised against an in-memory fake server. `Laravel.reset()` tears the
-facade down between tests.
-
-### Upgrading from 1.x
-
-* `LaravelOptions.authPrefix` / `devicePrefix` / `broadcastAuthPath` still work; they now default
-  to `<prefix>/auth`, `<prefix>/devices` and `<prefix>/broadcasting/auth`.
-* `LaravelException.errorCode` exposes `meta.error_code`; new subclasses:
-  `LaravelUpgradeRequiredException`, `LaravelConnectionRevokedException`, `LaravelAppKeyException`,
-  `LaravelConnectionNotFoundException`, `LaravelRateLimitException`, `LaravelMaintenanceException`.
-* A failed token refresh now clears the session locally (no network logout) and fires
-  `onSessionExpired` once — the previous refresh → logout → 401 dead-lock is gone.
-* `LaravelConnectionIndicator(echo: …)` still works; pass `manager:` to show the session status.
-* The connection state class is `LaravelConnectionState` (not `ConnectionState`, which would clash
-  with Flutter's `AsyncSnapshot` `ConnectionState`).
-* Requires Flutter ≥ 3.27 / Dart ≥ 3.6.
-
 ---
 
 ## 🔐 Authentication
