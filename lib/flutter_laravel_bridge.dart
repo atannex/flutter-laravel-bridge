@@ -11,6 +11,9 @@ export 'src/models/api_response.dart';
 // Authentication
 export 'src/auth/auth_manager.dart';
 export 'src/auth/auth_state.dart';
+export 'src/auth/fortify_models.dart';
+export 'src/auth/passkey_manager.dart';
+export 'src/auth/two_factor_manager.dart';
 export 'src/auth/token_storage.dart';
 
 // HTTP interceptors

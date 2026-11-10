@@ -9,7 +9,10 @@ import '../connection/bridge_ids.dart';
 import '../exceptions/laravel_exception.dart';
 import '../storage/key_value_store.dart';
 import 'auth_state.dart';
+import 'fortify_models.dart';
+import 'passkey_manager.dart';
 import 'token_storage.dart';
+import 'two_factor_manager.dart';
 
 /// Reactive authentication manager handling logins, token rotation, and user sessions.
 class AuthManager<TUser> {
@@ -43,6 +46,10 @@ class AuthManager<TUser> {
   Future<String?>? _refreshFuture;
   Timer? _refreshTimer;
   bool _disposed = false;
+  FortifyFeatures? _fortifyOverride;
+  PasswordConfirmation? _passwordConfirmation;
+  late final TwoFactorManager<TUser> twoFactor = TwoFactorManager<TUser>(this);
+  late final PasskeyManager passkeys = PasskeyManager(this);
 
   /// Current authentication state.
   AuthState get currentState => _currentState;
@@ -205,7 +212,8 @@ class AuthManager<TUser> {
     required String password,
     String? deviceName,
     Map<String, dynamic>? extra,
-  }) {
+  }) async {
+    requireFortifyFeature('registration');
     return _authenticate(
       client.endpoint(BridgeEndpoints.authRegister),
       {
@@ -485,6 +493,7 @@ class AuthManager<TUser> {
       debugPrint('AuthManager failed to clear the cached user: $e');
     }
     _currentUser = null;
+    _passwordConfirmation = null;
     _setState(const Unauthenticated());
   }
 
@@ -513,6 +522,289 @@ class AuthManager<TUser> {
       // Ignore network failures on logout
     } finally {
       await clearSession();
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Laravel Fortify over the bridge (FORTIFY.md)
+  // ---------------------------------------------------------------------------
+
+  /// Fortify features of the server (`features.fortify` of the handshake, or
+  /// of `GET config` after [refreshFortifyFeatures]).
+  FortifyFeatures get fortify =>
+      _fortifyOverride ??
+      client.serverInfo?.fortify ??
+      FortifyFeatures.unavailable(
+          registration: client.serverInfo?.features.registration ?? true);
+
+  /// Replace the discovered [fortify] features (`null` goes back to the
+  /// handshake of the client's server).
+  set fortify(FortifyFeatures? features) => _fortifyOverride = features;
+
+  /// Read `features.fortify` from `GET config` (useful without a
+  /// [LaravelConnectionManager], which already reads it from the handshake).
+  Future<FortifyFeatures> refreshFortifyFeatures() async {
+    final response = await client.get<dynamic>(
+      client.endpoint(BridgeEndpoints.config),
+      requestOptions: _publicAuthOptions(sendBearer: true),
+    );
+    final data = parseBridgeMap(response.data);
+    final features = parseBridgeMap(data['features']);
+    final raw = features['fortify'] ?? data['fortify'];
+    final parsed = FortifyFeatures.fromJson(raw,
+        registrationFallback:
+            parseBridgeBool(features['registration']) ?? fortify.registration);
+    _fortifyOverride = parsed;
+    return parsed;
+  }
+
+  /// Throw a [LaravelFeatureDisabledException] — without any request — when
+  /// the server published `features.fortify` and [feature] is off in it.
+  void requireFortifyFeature(String feature) {
+    final features = fortify;
+    if (!features.advertised) return;
+    final enabled = switch (feature) {
+      'registration' => features.registration,
+      'reset_passwords' => features.resetPasswords,
+      'email_verification' => features.emailVerification,
+      'update_profile_information' => features.updateProfileInformation,
+      'update_passwords' => features.updatePasswords,
+      'two_factor_authentication' => features.twoFactorAuthentication,
+      'passkeys' => features.passkeys,
+      _ => features.has(feature),
+    };
+    if (!enabled) {
+      throw LaravelFeatureDisabledException(
+        message: 'The server does not offer $feature.',
+        feature: feature,
+      );
+    }
+  }
+
+  /// Latest known password confirmation of this session (from
+  /// [confirmPassword] / [confirmedPasswordStatus]); `null` when unknown.
+  PasswordConfirmation? get passwordConfirmation => _passwordConfirmation;
+
+  /// Whether the password was confirmed recently enough, judged locally from
+  /// the last [confirmPassword] / [confirmedPasswordStatus] answer.
+  bool get isPasswordConfirmed =>
+      _passwordConfirmation?.isConfirmed(_clock()) ?? false;
+
+  /// Ask the server to send a password reset (a 6-digit code by default).
+  /// Always succeeds for a well-formed address: the server never reveals
+  /// whether an account exists.
+  Future<PasswordResetRequest> forgotPassword(String email) async {
+    requireFortifyFeature('reset_passwords');
+    final response = await client.post<dynamic>(
+      client.endpoint(BridgeEndpoints.authForgotPassword),
+      data: {'email': email},
+      requestOptions: _publicAuthOptions(),
+    );
+    return PasswordResetRequest.fromJson(parseBridgeMap(response.data));
+  }
+
+  /// Exchange the emailed [code] for a short-lived, single-use reset token
+  /// to pass to [resetPassword]. Throws [LaravelCodeException] when the code
+  /// is invalid, expired or locked.
+  Future<String> verifyPasswordResetCode({
+    required String email,
+    required String code,
+  }) async {
+    requireFortifyFeature('reset_passwords');
+    final response = await client.post<dynamic>(
+      client.endpoint(BridgeEndpoints.authResetPasswordVerifyCode),
+      data: {'email': email, 'code': code},
+      requestOptions: _publicAuthOptions(),
+    );
+    final token = parseBridgeMap(response.data)['reset_token']?.toString();
+    if (token == null || token.isEmpty) {
+      throw const LaravelException(
+          message: 'The server did not return a reset token.');
+    }
+    return token;
+  }
+
+  /// Choose a new password with a [resetToken] (from
+  /// [verifyPasswordResetCode]) or a Fortify broker [token] (from the email
+  /// link). The server signs every device of the user out.
+  Future<void> resetPassword({
+    required String email,
+    required String password,
+    required String passwordConfirmation,
+    String? resetToken,
+    String? token,
+  }) async {
+    if ((resetToken == null || resetToken.isEmpty) &&
+        (token == null || token.isEmpty)) {
+      throw ArgumentError('Pass either resetToken or token.');
+    }
+    requireFortifyFeature('reset_passwords');
+    await client.post<dynamic>(
+      client.endpoint(BridgeEndpoints.authResetPassword),
+      data: {
+        'email': email,
+        'password': password,
+        'password_confirmation': passwordConfirmation,
+        if (resetToken != null && resetToken.isNotEmpty)
+          'reset_token': resetToken,
+        if (token != null && token.isNotEmpty) 'token': token,
+      },
+      requestOptions: _publicAuthOptions(),
+    );
+  }
+
+  /// Email a verification code to the signed-in user. Throws
+  /// [LaravelAlreadyVerifiedException] when the address is already verified.
+  Future<void> sendEmailVerification() async {
+    requireFortifyFeature('email_verification');
+    await client.post<dynamic>(
+      client.endpoint(BridgeEndpoints.authEmailVerificationNotification),
+    );
+  }
+
+  /// Verify the signed-in user's email address with the emailed [code].
+  /// Updates [currentUser], the offline user cache and [stateStream].
+  Future<TUser> verifyEmail(String code) async {
+    requireFortifyFeature('email_verification');
+    final response = await client.post<dynamic>(
+      client.endpoint(BridgeEndpoints.authEmailVerify),
+      data: {'code': code},
+    );
+    return await _userFromResponse(response.data);
+  }
+
+  /// Update the signed-in user's profile with the fields of Fortify's
+  /// `UpdatesUserProfileInformation` (`name`, `email`, …). Updates
+  /// [currentUser], the offline user cache and [stateStream].
+  Future<TUser> updateProfile(Map<String, dynamic> fields) async {
+    requireFortifyFeature('update_profile_information');
+    final response = await client.put<dynamic>(
+      client.endpoint(BridgeEndpoints.authProfileInformation),
+      data: fields,
+    );
+    return await _userFromResponse(response.data);
+  }
+
+  /// Change the signed-in user's password. With [revokeOtherSessions] every
+  /// other device is signed out; this one stays signed in.
+  Future<void> updatePassword({
+    required String currentPassword,
+    required String password,
+    required String passwordConfirmation,
+    bool revokeOtherSessions = false,
+  }) async {
+    requireFortifyFeature('update_passwords');
+    final response = await client.put<dynamic>(
+      client.endpoint(BridgeEndpoints.authUserPassword),
+      data: {
+        'current_password': currentPassword,
+        'password': password,
+        'password_confirmation': passwordConfirmation,
+        if (revokeOtherSessions) 'revoke_other_sessions': true,
+      },
+    );
+    // Tolerate servers that rotate the current token on password change.
+    final data = parseBridgeMap(response.data);
+    if (data['authorization'] is Map) {
+      final token = await _persistAuthorization(data['authorization']);
+      final user = _currentUser;
+      if (token != null && user != null) {
+        _setState(Authenticated<TUser>(user: user, accessToken: token));
+      }
+    }
+  }
+
+  /// Confirm the signed-in user's [password] so sensitive actions (two-factor
+  /// and passkey management) are allowed for `password_timeout`.
+  /// A wrong password throws a [LaravelValidationError] (`password_invalid`).
+  Future<PasswordConfirmation> confirmPassword(String password) async {
+    final response = await client.post<dynamic>(
+      client.endpoint(BridgeEndpoints.authConfirmPassword),
+      data: {'password': password},
+    );
+    return _passwordConfirmation = PasswordConfirmation.fromJson(
+      parseBridgeMap(response.data),
+      now: _clock(),
+      timeout: fortify.passwordTimeout,
+      justConfirmed: true,
+    );
+  }
+
+  /// Ask the server whether the password was confirmed recently enough.
+  Future<PasswordConfirmation> confirmedPasswordStatus() async {
+    final response = await client.get<dynamic>(
+      client.endpoint(BridgeEndpoints.authConfirmedPasswordStatus),
+    );
+    return _passwordConfirmation = PasswordConfirmation.fromJson(
+      parseBridgeMap(response.data),
+      now: _clock(),
+      timeout: fortify.passwordTimeout,
+    );
+  }
+
+  /// Run [action]; when the server answers 423 `password_confirmation_required`
+  /// ask the user for their password with [askPassword], confirm it and run
+  /// [action] once more. When [askPassword] returns `null` (or an empty
+  /// string) the original [LaravelPasswordConfirmationRequiredException] is
+  /// rethrown; a wrong password throws the confirmation's validation error.
+  Future<T> runWithPasswordConfirmation<T>(
+    Future<T> Function() action,
+    Future<String?> Function() askPassword,
+  ) async {
+    try {
+      return await action();
+    } on LaravelPasswordConfirmationRequiredException {
+      _passwordConfirmation = null;
+      final password = await askPassword();
+      if (password == null || password.isEmpty) rethrow;
+      await confirmPassword(password);
+      return await action();
+    }
+  }
+
+  /// Forget the known password confirmation (after a 423).
+  void markPasswordUnconfirmed() => _passwordConfirmation = null;
+
+  /// Re-read the user from `auth/me` and publish it (two-factor changes).
+  Future<TUser?> reloadUser() async {
+    final user = await fetchUserProfile();
+    if (user != null) await _publishUser(user);
+    return user;
+  }
+
+  /// Parse the user of a Fortify response (`{user: {...}}`, or the bare user
+  /// object), cache it and publish it. Falls back to `auth/me`.
+  Future<TUser> _userFromResponse(dynamic data) async {
+    final map = parseBridgeMap(data);
+    final rawUser =
+        map['user'] is Map ? map['user'] : (map.containsKey('id') ? map : null);
+    if (rawUser == null) {
+      final user = await reloadUser();
+      if (user == null) {
+        throw const LaravelException(
+            message: 'The server did not return the user.');
+      }
+      return user;
+    }
+    final json = parseBridgeMap(rawUser);
+    final user = userParser(json);
+    await _cacheUser(json);
+    await _publishUser(user);
+    return user;
+  }
+
+  /// Publish a user payload received from the server (`{user: {...}}` or the
+  /// bare user; anything else re-reads `auth/me`): updates [currentUser], the
+  /// offline user cache and [stateStream].
+  Future<TUser> applyUserPayload(dynamic data) => _userFromResponse(data);
+
+  Future<void> _publishUser(TUser user) async {
+    _currentUser = user;
+    final state = _currentState;
+    String? token = state is Authenticated ? state.accessToken : null;
+    token ??= await tokenStorage.getAccessToken();
+    if (token != null && token.isNotEmpty) {
+      _setState(Authenticated<TUser>(user: user, accessToken: token));
     }
   }
 

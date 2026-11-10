@@ -22,6 +22,45 @@ class LaravelErrorCode {
   /// The authenticator-app code or recovery code sent with login was wrong.
   static const String twoFactorInvalid = 'two_factor_invalid';
 
+  /// Email + password did not match.
+  static const String invalidCredentials = 'invalid_credentials';
+
+  /// A sensitive action needs a recent password confirmation (423).
+  static const String passwordConfirmationRequired =
+      'password_confirmation_required';
+
+  /// The password sent to `confirm-password` is wrong (422).
+  static const String passwordInvalid = 'password_invalid';
+
+  /// An emailed code is wrong (422).
+  static const String codeInvalid = 'code_invalid';
+
+  /// An emailed code is too old (422).
+  static const String codeExpired = 'code_expired';
+
+  /// Too many wrong attempts: the code no longer works (423).
+  static const String codeLocked = 'code_locked';
+
+  /// The password reset token is unknown, used or expired (422).
+  static const String resetTokenInvalid = 'reset_token_invalid';
+
+  /// The Fortify feature is disabled on the server (404).
+  static const String featureDisabled = 'feature_disabled';
+
+  /// The email address is already verified (409).
+  static const String alreadyVerified = 'already_verified';
+
+  /// Two-factor authentication is not enabled for the user (404).
+  static const String twoFactorNotEnabled = 'two_factor_not_enabled';
+
+  /// Codes about emailed one-time codes and reset tokens.
+  static const Set<String> codeErrors = {
+    codeInvalid,
+    codeExpired,
+    codeLocked,
+    resetTokenInvalid,
+  };
+
   /// Whether [code] is one of the two-step sign-in challenge codes.
   static bool isTwoFactorChallenge(String? code) =>
       code == twoFactorRequired || code == twoFactorInvalid;
@@ -128,6 +167,105 @@ class LaravelTwoFactorRequiredException extends LaravelValidationError {
       'LaravelTwoFactorRequiredException: $message (invalid: $invalid)';
 }
 
+/// Why an emailed code (or reset token) was rejected.
+enum LaravelCodeErrorKind {
+  /// Wrong code, or unknown / used reset token.
+  invalid,
+
+  /// The code is too old: ask for a new one.
+  expired,
+
+  /// Too many wrong attempts: ask for a new one.
+  locked,
+}
+
+/// Thrown when an emailed code or a password reset token is rejected:
+/// 422 `code_invalid` / `code_expired` / `reset_token_invalid`,
+/// 423 `code_locked` (FORTIFY.md §2).
+///
+/// It extends [LaravelValidationError] so generic 422 handlers keep working;
+/// the message for the field is in `first('code')` (or `first('reset_token')`).
+class LaravelCodeException extends LaravelValidationError {
+  final LaravelCodeErrorKind kind;
+
+  LaravelCodeException({
+    required super.message,
+    required this.kind,
+    super.fieldErrors = const {},
+    int? statusCode,
+    super.responseData,
+    String? errorCode,
+  }) : super(
+          statusCode:
+              statusCode ?? (kind == LaravelCodeErrorKind.locked ? 423 : 422),
+          errorCode: errorCode ?? _defaultCode(kind),
+        );
+
+  static String _defaultCode(LaravelCodeErrorKind kind) {
+    switch (kind) {
+      case LaravelCodeErrorKind.invalid:
+        return LaravelErrorCode.codeInvalid;
+      case LaravelCodeErrorKind.expired:
+        return LaravelErrorCode.codeExpired;
+      case LaravelCodeErrorKind.locked:
+        return LaravelErrorCode.codeLocked;
+    }
+  }
+
+  /// Kind matching a `meta.error_code`, or `null` for other codes.
+  static LaravelCodeErrorKind? kindOf(String? code) {
+    switch (code) {
+      case LaravelErrorCode.codeInvalid:
+      case LaravelErrorCode.resetTokenInvalid:
+        return LaravelCodeErrorKind.invalid;
+      case LaravelErrorCode.codeExpired:
+        return LaravelCodeErrorKind.expired;
+      case LaravelErrorCode.codeLocked:
+        return LaravelCodeErrorKind.locked;
+    }
+    return null;
+  }
+
+  bool get isInvalid => kind == LaravelCodeErrorKind.invalid;
+  bool get isExpired => kind == LaravelCodeErrorKind.expired;
+  bool get isLocked => kind == LaravelCodeErrorKind.locked;
+
+  /// The reset token (not a code) was rejected: start the reset again.
+  bool get isResetToken => errorCode == LaravelErrorCode.resetTokenInvalid;
+
+  /// Whether a new code must be requested (expired or locked).
+  bool get needsNewCode => kind != LaravelCodeErrorKind.invalid;
+
+  @override
+  String toString() => 'LaravelCodeException [${kind.name}]: $message';
+}
+
+/// Thrown when a sensitive action needs a recent password confirmation
+/// (423 `password_confirmation_required`). Confirm with
+/// `auth.confirmPassword(password)` and retry, or wrap the call in
+/// `auth.runWithPasswordConfirmation`.
+class LaravelPasswordConfirmationRequiredException extends LaravelException {
+  const LaravelPasswordConfirmationRequiredException({
+    super.message = 'Please confirm your password to continue.',
+    super.statusCode = 423,
+    super.responseData,
+    super.errorCode = LaravelErrorCode.passwordConfirmationRequired,
+  });
+
+  @override
+  String toString() => 'LaravelPasswordConfirmationRequiredException: $message';
+}
+
+/// Thrown when the email address is already verified (409 `already_verified`).
+class LaravelAlreadyVerifiedException extends LaravelException {
+  const LaravelAlreadyVerifiedException({
+    super.message = 'Your email address is already verified.',
+    super.statusCode = 409,
+    super.responseData,
+    super.errorCode = LaravelErrorCode.alreadyVerified,
+  });
+}
+
 /// Thrown when an unauthenticated request is rejected (HTTP 401).
 class LaravelAuthenticationException extends LaravelException {
   const LaravelAuthenticationException({
@@ -202,6 +340,27 @@ class LaravelConnectionNotFoundException extends LaravelNotFoundException {
     super.responseData,
     super.errorCode = LaravelErrorCode.connectionNotFound,
   });
+}
+
+/// Thrown when a Fortify feature is disabled on the server
+/// (404 `feature_disabled`), or locally — without any request — when the
+/// server's `features.fortify` says the feature is off.
+class LaravelFeatureDisabledException extends LaravelNotFoundException {
+  /// Feature name as published in `features.fortify` (`reset_passwords`,
+  /// `passkeys`…), when known.
+  final String? feature;
+
+  const LaravelFeatureDisabledException({
+    super.message = 'This feature is not available.',
+    super.statusCode = 404,
+    super.responseData,
+    super.errorCode = LaravelErrorCode.featureDisabled,
+    this.feature,
+  });
+
+  @override
+  String toString() =>
+      'LaravelFeatureDisabledException: $message${feature != null ? ' ($feature)' : ''}';
 }
 
 /// Thrown when the app version is below the server's minimum version (HTTP 426).

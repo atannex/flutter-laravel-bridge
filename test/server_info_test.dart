@@ -123,7 +123,8 @@ void main() {
       const info = ServerInfo();
       for (final key in BridgeEndpoints.relativePaths.keys) {
         expect(
-          info.endpoint(key, params: {'connection': 'c', 'device': 'd'}),
+          info.endpoint(key,
+              params: {'connection': 'c', 'device': 'd', 'passkey': 'p'}),
           startsWith('api/flutter/'),
         );
       }

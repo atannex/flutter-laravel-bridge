@@ -111,7 +111,7 @@ class ErrorInterceptor extends Interceptor {
       );
     }
 
-    if (statusCode == 422 && data is Map) {
+    Map<String, List<String>> fieldErrorsOf() {
       final fieldErrors = <String, List<String>>{};
       if (errors is Map) {
         errors.forEach((key, value) {
@@ -123,6 +123,60 @@ class ErrorInterceptor extends Interceptor {
           }
         });
       }
+      return fieldErrors;
+    }
+
+    // Fortify over the bridge (FORTIFY.md §2): emailed codes / reset tokens.
+    final codeKind = LaravelCodeException.kindOf(code);
+    if (codeKind != null) {
+      return LaravelCodeException(
+        message: extractMessage(switch (codeKind) {
+          LaravelCodeErrorKind.invalid => 'The code is invalid.',
+          LaravelCodeErrorKind.expired => 'The code has expired.',
+          LaravelCodeErrorKind.locked =>
+            'Too many attempts. Request a new code.',
+        }),
+        kind: codeKind,
+        fieldErrors: fieldErrorsOf(),
+        statusCode: statusCode,
+        responseData: data,
+        errorCode: code,
+      );
+    }
+
+    if (code == LaravelErrorCode.passwordConfirmationRequired ||
+        (statusCode == 423 && code == null)) {
+      return LaravelPasswordConfirmationRequiredException(
+        message: extractMessage('Please confirm your password to continue.'),
+        statusCode: statusCode,
+        responseData: data,
+      );
+    }
+
+    if (code == LaravelErrorCode.alreadyVerified) {
+      return LaravelAlreadyVerifiedException(
+        message: extractMessage('Your email address is already verified.'),
+        statusCode: statusCode,
+        responseData: data,
+      );
+    }
+
+    // 404 only: a 403 `feature_disabled` (bridge feature switched off) keeps
+    // its LaravelPermissionException mapping.
+    if (code == LaravelErrorCode.featureDisabled && statusCode == 404) {
+      final feature = errors is Map ? errors['feature'] : null;
+      return LaravelFeatureDisabledException(
+        message: extractMessage('This feature is not available.'),
+        statusCode: statusCode,
+        responseData: data,
+        feature: feature is List
+            ? (feature.isEmpty ? null : feature.first?.toString())
+            : feature?.toString(),
+      );
+    }
+
+    if (statusCode == 422 && data is Map) {
+      final fieldErrors = fieldErrorsOf();
       final payload = data['data'];
       final twoFactorFlag = payload is Map && payload['two_factor'] == true;
       if (LaravelErrorCode.isTwoFactorChallenge(code) ||

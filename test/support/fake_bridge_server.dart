@@ -81,6 +81,35 @@ class _RefreshToken {
   _RefreshToken(this.userId, this.accessToken, this.connectionId);
 }
 
+/// An email sent by [FakeBridgeServer] (password reset / verification code).
+class FakeMail {
+  final String to;
+
+  /// `reset` or `verify`.
+  final String purpose;
+  final String code;
+
+  FakeMail(this.to, this.purpose, this.code);
+
+  @override
+  String toString() => 'FakeMail($purpose → $to: $code)';
+}
+
+class _FakeCode {
+  final String code;
+  final DateTime expiresAt;
+  int attempts = 0;
+
+  _FakeCode(this.code, this.expiresAt);
+}
+
+class _FakeResetToken {
+  final String email;
+  final DateTime expiresAt;
+
+  _FakeResetToken(this.email, this.expiresAt);
+}
+
 typedef FakeRouteHandler = FutureOr<ResponseBody> Function(
     RecordedRequest request, FakeBridgeServer server);
 
@@ -108,15 +137,98 @@ class FakeBridgeServer implements HttpClientAdapter {
       'id': 1,
       'name': 'Alice',
       'email': 'a@example.com',
-      'password': 'secret'
+      'password': 'secret',
+      'email_verified_at': '2026-01-01T00:00:00.000Z',
+      'passkeys': <Map<String, dynamic>>[
+        {
+          'id': 'pk-1',
+          'name': 'MacBook',
+          'created_at': '2026-05-01T08:00:00.000Z',
+          'last_used_at': '2026-11-01T08:00:00.000Z',
+        },
+        {
+          'id': 'pk-2',
+          'name': 'iPhone',
+          'created_at': '2026-06-01T08:00:00.000Z',
+          'last_used_at': null,
+        },
+      ],
     },
     'b@example.com': {
       'id': 2,
       'name': 'Bob',
       'email': 'b@example.com',
-      'password': 'secret'
+      'password': 'secret',
+      'email_verified_at': null,
+      'passkeys': <Map<String, dynamic>>[],
     },
   };
+
+  // --- Fortify over the bridge (docs/FORTIFY.md) ---------------------------
+
+  /// `features.fortify` published by the handshake and `GET config`; every
+  /// endpoint of a feature switched off here answers 404 `feature_disabled`.
+  final Map<String, dynamic> fortify = {
+    'installed': true,
+    'enabled': true,
+    'registration': true,
+    'reset_passwords': true,
+    'email_verification': true,
+    'update_profile_information': true,
+    'update_passwords': true,
+    'two_factor_authentication': true,
+    'two_factor_confirm': true,
+    'two_factor_confirm_password': true,
+    'passkeys': true,
+    'passkeys_confirm_password': true,
+    'username': 'email',
+    'lowercase_usernames': false,
+    'reset_channel': 'code',
+    'password_min': 8,
+    'password_timeout': 10800,
+    'codes': {'length': 6, 'ttl': 600},
+  };
+
+  /// Whether `features.fortify` is published at all (a 2.1 server: no).
+  bool advertiseFortify = true;
+
+  /// Emails "sent" by the server.
+  final List<FakeMail> outbox = [];
+
+  /// The code an authenticator app shows right now.
+  String totpCode = '123456';
+  int maxCodeAttempts = 5;
+  int resetTokenTtl = 600;
+
+  /// Forgot-password requests allowed per email before 429.
+  int forgotPasswordLimit = 5;
+
+  /// Fortify broker tokens (from the reset link) → email.
+  final Map<String, String> brokerTokens = {};
+
+  Duration _elapsed = Duration.zero;
+  final Map<String, _FakeCode> _codes = {};
+  final Map<String, _FakeResetToken> _resetTokens = {};
+  final Map<String, DateTime> _passwordConfirmedAt = {};
+  final Map<String, int> _forgotCounts = {};
+  int _codeSeq = 0;
+
+  /// Server clock (moves with [advance]).
+  DateTime get now => serverTime.add(_elapsed);
+
+  /// Let server time pass (code TTLs, password confirmation window).
+  void advance(Duration duration) => _elapsed += duration;
+
+  /// Last code emailed to [email] for [purpose] (`reset` / `verify`).
+  String? lastCode(String email, [String purpose = 'reset']) {
+    for (final mail in outbox.reversed) {
+      if (mail.to == email && mail.purpose == purpose) return mail.code;
+    }
+    return null;
+  }
+
+  int get _codeTtl => ((fortify['codes'] as Map?)?['ttl'] as int?) ?? 600;
+  int get _passwordTimeout => (fortify['password_timeout'] as int?) ?? 10800;
 
   int _sessionSeq = 0;
   int _tokenSeq = 0;
@@ -270,7 +382,12 @@ class FakeBridgeServer implements HttpClientAdapter {
       return _ok({'pong': true, 'server_time': serverTime.toIso8601String()});
     }
     if (route == 'handshake' && method == 'GET') return _ok(_handshake(appKey));
-    if (route == 'config' && method == 'GET') return _ok({'theme': 'dark'});
+    if (route == 'config' && method == 'GET') {
+      return _ok({
+        'theme': 'dark',
+        if (advertiseFortify) 'features': {'fortify': fortify},
+      });
+    }
 
     if (route == 'connections/connect' && method == 'POST') {
       if (body['device_id'] == null || body['platform'] == null) {
@@ -380,6 +497,21 @@ class FakeBridgeServer implements HttpClientAdapter {
       if (user == null || user['password'] != body['password']) {
         return _error(401, 'Invalid credentials', code: 'unauthenticated');
       }
+      if (_twoFactorEnabled(user)) {
+        final code = body['code'];
+        final recovery = body['recovery_code'];
+        if (code == null && recovery == null) {
+          return _challenge('two_factor_required', 'Two-factor code required.');
+        }
+        final codes = user['two_factor_recovery_codes'] as List<String>;
+        if (code != null && code != totpCode) {
+          return _challenge('two_factor_invalid', 'The code is invalid.');
+        }
+        if (code == null && !codes.remove(recovery)) {
+          return _challenge(
+              'two_factor_invalid', 'The recovery code is invalid.');
+        }
+      }
       if (connectionId != null) sessions[connectionId]?.userId = user['id'];
       return _ok({
         'user': _publicUser(user),
@@ -426,8 +558,436 @@ class FakeBridgeServer implements HttpClientAdapter {
       return _ok({'auth': 'key:signature'});
     }
 
+    final fortifyResponse = _fortifyRoute(request, route, method, body, userId);
+    if (fortifyResponse != null) return fortifyResponse;
+
     return _error(404, 'Route $method $route not found');
   }
+
+  ResponseBody _challenge(String code, String message) => json(422, {
+        'success': false,
+        'message': message,
+        'data': {'two_factor': true},
+        'errors': {
+          'code': [message]
+        },
+        'meta': {'trace_id': 't', 'error_code': code},
+      });
+
+  bool _twoFactorEnabled(Map<String, dynamic> user) =>
+      user['two_factor_secret'] != null &&
+      (fortify['two_factor_confirm'] != true ||
+          user['two_factor_confirmed_at'] != null);
+
+  bool _on(String feature) => fortify[feature] == true;
+
+  ResponseBody _disabled(String feature) =>
+      _error(404, 'This feature is not available.',
+          code: 'feature_disabled', errors: {'feature': feature});
+
+  String _issueCode(String purpose, String email) {
+    final length = ((fortify['codes'] as Map?)?['length'] as int?) ?? 6;
+    final code = '${++_codeSeq}'.padLeft(length, '0');
+    _codes['$purpose:$email'] =
+        _FakeCode(code, now.add(Duration(seconds: _codeTtl)));
+    outbox.add(FakeMail(email, purpose, code));
+    return code;
+  }
+
+  /// Check [given] against the pending [purpose] code of [email]; `null` when
+  /// it matches (and is consumed), otherwise the error response.
+  ResponseBody? _checkCode(String purpose, String email, Object? given) {
+    final key = '$purpose:$email';
+    final pending = _codes[key];
+    if (pending == null) {
+      return _error(422, 'The code is invalid.', code: 'code_invalid', errors: {
+        'code': ['The code is invalid.']
+      });
+    }
+    if (pending.attempts >= maxCodeAttempts) {
+      return _error(423, 'Too many attempts. Request a new code.',
+          code: 'code_locked',
+          errors: {
+            'code': ['Too many attempts. Request a new code.']
+          });
+    }
+    if (!now.isBefore(pending.expiresAt)) {
+      _codes.remove(key);
+      return _error(422, 'The code has expired.',
+          code: 'code_expired',
+          errors: {
+            'code': ['The code has expired.']
+          });
+    }
+    if (pending.code != given?.toString()) {
+      pending.attempts++;
+      return _error(422, 'The code is invalid.', code: 'code_invalid', errors: {
+        'code': ['The code is invalid.']
+      });
+    }
+    _codes.remove(key);
+    return null;
+  }
+
+  ResponseBody? _validatePassword(Map<String, dynamic> body) {
+    final password = body['password']?.toString() ?? '';
+    final min = (fortify['password_min'] as int?) ?? 8;
+    if (password.length < min) {
+      return _error(422, 'The password is too short.',
+          code: 'validation_failed',
+          errors: {
+            'password': ['The password must be at least $min characters.']
+          });
+    }
+    if (password != body['password_confirmation']) {
+      return _error(422, 'The password confirmation does not match.',
+          code: 'validation_failed',
+          errors: {
+            'password': ['The password field confirmation does not match.']
+          });
+    }
+    return null;
+  }
+
+  bool _passwordRecentlyConfirmed(String? bearer) {
+    final at = bearer == null ? null : _passwordConfirmedAt[bearer];
+    return at != null &&
+        now.isBefore(at.add(Duration(seconds: _passwordTimeout)));
+  }
+
+  /// Fortify `password.confirm`: 423 unless the token confirmed recently.
+  ResponseBody? _requireConfirmedPassword(RecordedRequest request,
+      [String option = 'two_factor_confirm_password']) {
+    if (!_on(option)) return null;
+    if (_passwordRecentlyConfirmed(_bearer(request))) return null;
+    return _error(423, 'Password confirmation required.',
+        code: 'password_confirmation_required');
+  }
+
+  /// Revoke every bridge token and connection of [userId], but [keepToken].
+  void _revokeUser(int userId, {String? keepToken}) {
+    accessTokens.removeWhere((token, id) => id == userId && token != keepToken);
+    String? keepConnection;
+    for (final entry in refreshTokens.entries) {
+      if (entry.value.userId != userId) continue;
+      if (entry.value.accessToken == keepToken) {
+        keepConnection = entry.value.connectionId;
+        continue;
+      }
+      entry.value.revoked = true;
+    }
+    for (final session in sessions.values.toList()) {
+      if (session.userId == userId &&
+          session.status != 'revoked' &&
+          session.id != keepConnection) {
+        revoke(session.id);
+      }
+    }
+  }
+
+  Map<String, dynamic> _userById(int id) =>
+      users.values.firstWhere((u) => u['id'] == id);
+
+  ResponseBody? _fortifyRoute(RecordedRequest request, String route,
+      String method, Map<String, dynamic> body, int? userId) {
+    // ---- guest ----
+    if (route == 'auth/forgot-password' && method == 'POST') {
+      if (!_on('reset_passwords')) return _disabled('reset_passwords');
+      final email = body['email']?.toString() ?? '';
+      final count = _forgotCounts[email] = (_forgotCounts[email] ?? 0) + 1;
+      if (count > forgotPasswordLimit) {
+        return _error(429, 'Too many requests.', code: 'too_many_requests');
+      }
+      if (users.containsKey(email)) _issueCode('reset', email);
+      return _ok({'sent': true, 'channel': 'code', 'expires_in': _codeTtl});
+    }
+
+    if (route == 'auth/reset-password/verify-code' && method == 'POST') {
+      if (!_on('reset_passwords')) return _disabled('reset_passwords');
+      final email = body['email']?.toString() ?? '';
+      final failure = _checkCode('reset', email, body['code']);
+      if (failure != null) return failure;
+      final token = 'reset-${++_codeSeq}-$email';
+      _resetTokens[token] =
+          _FakeResetToken(email, now.add(Duration(seconds: resetTokenTtl)));
+      return _ok({'reset_token': token, 'expires_in': resetTokenTtl});
+    }
+
+    if (route == 'auth/reset-password' && method == 'POST') {
+      if (!_on('reset_passwords')) return _disabled('reset_passwords');
+      final email = body['email']?.toString() ?? '';
+      final resetToken = body['reset_token']?.toString();
+      final brokerToken = body['token']?.toString();
+      var valid = false;
+      if (resetToken != null) {
+        final pending = _resetTokens[resetToken];
+        valid = pending != null &&
+            pending.email == email &&
+            now.isBefore(pending.expiresAt);
+      } else if (brokerToken != null) {
+        valid = brokerTokens[brokerToken] == email;
+      }
+      if (!valid || !users.containsKey(email)) {
+        return _error(422, 'This password reset token is invalid.',
+            code: 'reset_token_invalid',
+            errors: {
+              'email': ['This password reset token is invalid.']
+            });
+      }
+      final failure = _validatePassword(body);
+      if (failure != null) return failure;
+      if (resetToken != null) _resetTokens.remove(resetToken);
+      if (brokerToken != null) brokerTokens.remove(brokerToken);
+      final user = users[email]!;
+      user['password'] = body['password'];
+      _revokeUser(user['id'] as int);
+      return _ok({'reset': true});
+    }
+
+    // ---- signed in ----
+    const authenticated = {
+      'auth/email/verification-notification',
+      'auth/email/verify',
+      'auth/user/profile-information',
+      'auth/user/password',
+      'auth/user/confirm-password',
+      'auth/user/confirmed-password-status',
+      'auth/user/two-factor-authentication',
+      'auth/user/two-factor-qr-code',
+      'auth/user/two-factor-secret-key',
+      'auth/user/confirmed-two-factor-authentication',
+      'auth/user/two-factor-recovery-codes',
+      'auth/user/passkeys',
+    };
+    final passkeyMatch =
+        RegExp(r'^auth/user/passkeys/([^/]+)$').firstMatch(route);
+    if (!authenticated.contains(route) && passkeyMatch == null) return null;
+    if (userId == null) {
+      return _error(401, 'Unauthenticated', code: 'unauthenticated');
+    }
+    final user = _userById(userId);
+    final email = user['email'] as String;
+    final bearer = _bearer(request);
+
+    if (route == 'auth/email/verification-notification' && method == 'POST') {
+      if (!_on('email_verification')) return _disabled('email_verification');
+      if (user['email_verified_at'] != null) {
+        return _error(409, 'Your email address is already verified.',
+            code: 'already_verified');
+      }
+      _issueCode('verify', email);
+      return _ok({'sent': true, 'expires_in': _codeTtl});
+    }
+
+    if (route == 'auth/email/verify' && method == 'POST') {
+      if (!_on('email_verification')) return _disabled('email_verification');
+      if (user['email_verified_at'] != null) {
+        return _error(409, 'Your email address is already verified.',
+            code: 'already_verified');
+      }
+      final failure = _checkCode('verify', email, body['code']);
+      if (failure != null) return failure;
+      user['email_verified_at'] = now.toIso8601String();
+      return _ok({'user': _publicUser(user)});
+    }
+
+    if (route == 'auth/user/profile-information' && method == 'PUT') {
+      if (!_on('update_profile_information')) {
+        return _disabled('update_profile_information');
+      }
+      final name = body['name']?.toString() ?? '';
+      final newEmail = body['email']?.toString() ?? '';
+      final errors = <String, List<String>>{
+        if (name.isEmpty) 'name': ['The name field is required.'],
+        if (!newEmail.contains('@'))
+          'email': ['The email field must be a valid email address.']
+        else if (newEmail != email && users.containsKey(newEmail))
+          'email': ['The email has already been taken.'],
+      };
+      if (errors.isNotEmpty) {
+        return _error(422, errors.values.first.first,
+            code: 'validation_failed', errors: errors);
+      }
+      final emailChanged = newEmail != email;
+      user['name'] = name;
+      if (emailChanged) {
+        users.remove(email);
+        user['email'] = newEmail;
+        user['email_verified_at'] = null;
+        users[newEmail] = user;
+      }
+      return _ok({
+        'user': _publicUser(user),
+        'email_verification_required':
+            emailChanged && _on('email_verification'),
+      });
+    }
+
+    if (route == 'auth/user/password' && method == 'PUT') {
+      if (!_on('update_passwords')) return _disabled('update_passwords');
+      if (body['current_password'] != user['password']) {
+        return _error(422, 'The provided password is incorrect.',
+            code: 'validation_failed',
+            errors: {
+              'current_password': ['The provided password is incorrect.']
+            });
+      }
+      final failure = _validatePassword(body);
+      if (failure != null) return failure;
+      user['password'] = body['password'];
+      if (body['revoke_other_sessions'] == true) {
+        _revokeUser(userId, keepToken: bearer);
+      }
+      return _ok({'updated': true});
+    }
+
+    if (route == 'auth/user/confirm-password' && method == 'POST') {
+      if (body['password'] != user['password']) {
+        return _error(422, 'The provided password was incorrect.',
+            code: 'password_invalid',
+            errors: {
+              'password': ['The provided password was incorrect.']
+            });
+      }
+      _passwordConfirmedAt[bearer!] = now;
+      return _ok({'confirmed': true, 'expires_in': _passwordTimeout});
+    }
+
+    if (route == 'auth/user/confirmed-password-status' && method == 'GET') {
+      final at = _passwordConfirmedAt[bearer];
+      final confirmed = _passwordRecentlyConfirmed(bearer);
+      return _ok({
+        'confirmed': confirmed,
+        'expires_in': confirmed
+            ? at!
+                .add(Duration(seconds: _passwordTimeout))
+                .difference(now)
+                .inSeconds
+            : 0,
+      });
+    }
+
+    if (route.startsWith('auth/user/two-factor') ||
+        route == 'auth/user/confirmed-two-factor-authentication') {
+      if (!_on('two_factor_authentication')) {
+        return _disabled('two_factor_authentication');
+      }
+      final requiresConfirmation = _on('two_factor_confirm');
+
+      if (route == 'auth/user/two-factor-authentication' && method == 'POST') {
+        final locked = _requireConfirmedPassword(request);
+        if (locked != null) return locked;
+        if (user['two_factor_secret'] == null) {
+          user['two_factor_secret'] = 'JBSWY3DPEHPK3PXP';
+          user['two_factor_recovery_codes'] = _recoveryCodes();
+          user['two_factor_confirmed_at'] =
+              requiresConfirmation ? null : now.toIso8601String();
+        }
+        final confirmed = user['two_factor_confirmed_at'] != null;
+        return _ok({
+          'enabled': true,
+          'confirmed': confirmed,
+          'requires_confirmation': requiresConfirmation,
+        });
+      }
+
+      if (route == 'auth/user/two-factor-authentication' &&
+          method == 'DELETE') {
+        final locked = _requireConfirmedPassword(request);
+        if (locked != null) return locked;
+        user
+          ..['two_factor_secret'] = null
+          ..['two_factor_recovery_codes'] = null
+          ..['two_factor_confirmed_at'] = null;
+        return _ok({'enabled': false});
+      }
+
+      final secret = user['two_factor_secret'] as String?;
+      ResponseBody notEnabled() =>
+          _error(404, 'Two-factor authentication is not enabled.',
+              code: 'two_factor_not_enabled');
+
+      if (route == 'auth/user/two-factor-qr-code' && method == 'GET') {
+        if (secret == null) return notEnabled();
+        return _ok({
+          'svg': '<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>',
+          'url': 'otpauth://totp/$name:${Uri.encodeComponent(email)}'
+              '?secret=$secret&issuer=$name',
+        });
+      }
+
+      if (route == 'auth/user/two-factor-secret-key' && method == 'GET') {
+        if (secret == null) return notEnabled();
+        return _ok({'secret_key': secret});
+      }
+
+      if (route == 'auth/user/confirmed-two-factor-authentication' &&
+          method == 'POST') {
+        if (secret == null) return notEnabled();
+        if (body['code'] != totpCode) {
+          return _error(
+              422,
+              'The provided two factor authentication code '
+              'was invalid.',
+              code: 'two_factor_invalid',
+              errors: {
+                'code': [
+                  'The provided two factor authentication code was invalid.'
+                ]
+              });
+        }
+        user['two_factor_confirmed_at'] = now.toIso8601String();
+        return _ok({'confirmed': true, 'user': _publicUser(user)});
+      }
+
+      if (route == 'auth/user/two-factor-recovery-codes') {
+        final locked = _requireConfirmedPassword(request);
+        if (locked != null) return locked;
+        if (secret == null) return notEnabled();
+        if (method == 'POST') {
+          user['two_factor_recovery_codes'] = _recoveryCodes();
+        } else if (method != 'GET') {
+          return null;
+        }
+        return _ok({'recovery_codes': user['two_factor_recovery_codes']});
+      }
+      return null;
+    }
+
+    if (route == 'auth/user/passkeys' || passkeyMatch != null) {
+      if (!_on('passkeys')) return _disabled('passkeys');
+      final passkeys = user['passkeys'] as List<Map<String, dynamic>>;
+      if (passkeyMatch == null) {
+        return method == 'GET' ? _ok(passkeys) : null;
+      }
+      final id = Uri.decodeComponent(passkeyMatch.group(1)!);
+      final index = passkeys.indexWhere((p) => p['id'] == id);
+      if (index < 0) return _error(404, 'Passkey not found.');
+      if (method == 'PATCH') {
+        final newName = body['name']?.toString() ?? '';
+        if (newName.isEmpty) {
+          return _error(422, 'The name field is required.',
+              code: 'validation_failed',
+              errors: {
+                'name': ['The name field is required.']
+              });
+        }
+        passkeys[index]['name'] = newName;
+        return _ok(passkeys[index]);
+      }
+      if (method == 'DELETE') {
+        final locked =
+            _requireConfirmedPassword(request, 'passkeys_confirm_password');
+        if (locked != null) return locked;
+        passkeys.removeAt(index);
+        return _ok({'deleted': true});
+      }
+    }
+    return null;
+  }
+
+  List<String> _recoveryCodes() =>
+      List.generate(8, (i) => 'rc-${++_codeSeq}-$i');
 
   Map<String, dynamic> _handshake(String? appKey) {
     final endpoints = <String, String>{
@@ -465,6 +1025,7 @@ class FakeBridgeServer implements HttpClientAdapter {
         'broadcasting': broadcasting,
         'connections': true,
         'push': false,
+        if (advertiseFortify) 'fortify': fortify,
       },
       if (!omitEndpoints) 'endpoints': endpoints,
       'broadcasting': broadcasting
@@ -501,8 +1062,18 @@ class FakeBridgeServer implements HttpClientAdapter {
     };
   }
 
-  Map<String, dynamic> _publicUser(Map<String, dynamic> user) =>
-      {'id': user['id'], 'name': user['name'], 'email': user['email']};
+  Map<String, dynamic> _publicUser(Map<String, dynamic> user) => {
+        'id': user['id'],
+        'name': user['name'],
+        'email': user['email'],
+        'email_verified': user['email_verified_at'] != null,
+        'email_verified_at': user['email_verified_at'],
+        'two_factor_enabled': _twoFactorEnabled(user),
+        'two_factor_pending_confirmation': user['two_factor_secret'] != null &&
+            user['two_factor_confirmed_at'] == null &&
+            fortify['two_factor_confirm'] == true,
+        'passkeys_count': (user['passkeys'] as List?)?.length ?? 0,
+      };
 
   String? _bearer(RecordedRequest request) {
     final header = request.header('Authorization');

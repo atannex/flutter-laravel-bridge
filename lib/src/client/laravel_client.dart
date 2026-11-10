@@ -297,6 +297,32 @@ class LaravelClient {
     }
   }
 
+  /// Perform a PATCH request.
+  Future<ApiResponse<T>> patch<T>(
+    String path, {
+    dynamic data,
+    Map<String, dynamic>? queryParameters,
+    T Function(dynamic json)? fromJson,
+    bool queueIfOffline = false,
+    Options? requestOptions,
+  }) async {
+    try {
+      final response = await _dio.patch<dynamic>(
+        path,
+        data: data,
+        queryParameters: queryParameters,
+        options: requestOptions,
+      );
+
+      return ApiResponse<T>.fromBody(response.data, fromJson);
+    } on DioException catch (e) {
+      if (queueIfOffline && e.error is LaravelNetworkException) {
+        _enqueueMutation('PATCH', path, data, queryParameters);
+      }
+      _throwTyped(e);
+    }
+  }
+
   /// Perform a DELETE request.
   Future<ApiResponse<T>> delete<T>(
     String path, {

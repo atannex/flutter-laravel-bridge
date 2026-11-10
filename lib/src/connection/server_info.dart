@@ -1,3 +1,4 @@
+import '../auth/fortify_models.dart';
 import '../echo/echo_options.dart';
 import 'bridge_endpoints.dart';
 import 'bridge_ids.dart';
@@ -150,6 +151,9 @@ class ServerFeatures {
   final bool connections;
   final bool push;
 
+  /// Laravel Fortify features exposed over the bridge (`features.fortify`).
+  final FortifyFeatures fortify;
+
   /// Raw map, including any feature flags unknown to this client version.
   final Map<String, dynamic> raw;
 
@@ -162,23 +166,29 @@ class ServerFeatures {
     this.broadcasting = false,
     this.connections = true,
     this.push = false,
+    this.fortify = const FortifyFeatures.unavailable(),
     this.raw = const {},
   });
 
   /// Check an arbitrary feature flag by its server name.
   bool has(String feature) => parseBridgeBool(raw[feature]) ?? false;
 
-  factory ServerFeatures.fromJson(Map<String, dynamic> json) => ServerFeatures(
-        auth: parseBridgeBool(json['auth']) ?? true,
-        registration: parseBridgeBool(json['registration']) ?? true,
-        socialAuth: parseBridgeBool(json['social_auth']) ?? false,
-        twoFactor: parseBridgeBool(json['two_factor']) ?? false,
-        devices: parseBridgeBool(json['devices']) ?? true,
-        broadcasting: parseBridgeBool(json['broadcasting']) ?? false,
-        connections: parseBridgeBool(json['connections']) ?? true,
-        push: parseBridgeBool(json['push']) ?? false,
-        raw: Map<String, dynamic>.unmodifiable(json),
-      );
+  factory ServerFeatures.fromJson(Map<String, dynamic> json) {
+    final registration = parseBridgeBool(json['registration']) ?? true;
+    return ServerFeatures(
+      auth: parseBridgeBool(json['auth']) ?? true,
+      registration: registration,
+      socialAuth: parseBridgeBool(json['social_auth']) ?? false,
+      twoFactor: parseBridgeBool(json['two_factor']) ?? false,
+      devices: parseBridgeBool(json['devices']) ?? true,
+      broadcasting: parseBridgeBool(json['broadcasting']) ?? false,
+      connections: parseBridgeBool(json['connections']) ?? true,
+      push: parseBridgeBool(json['push']) ?? false,
+      fortify: FortifyFeatures.fromJson(json['fortify'],
+          registrationFallback: registration),
+      raw: Map<String, dynamic>.unmodifiable(json),
+    );
+  }
 
   Map<String, dynamic> toJson() => {
         ...raw,
@@ -190,6 +200,7 @@ class ServerFeatures {
         'broadcasting': broadcasting,
         'connections': connections,
         'push': push,
+        if (fortify.advertised) 'fortify': fortify.toJson(),
       };
 }
 
@@ -332,6 +343,9 @@ class ServerInfo {
 
   /// Bridge route prefix of this server.
   String get prefix => bridge.prefix;
+
+  /// Laravel Fortify features exposed over the bridge (FORTIFY.md §3).
+  FortifyFeatures get fortify => features.fortify;
 
   /// Whether the server advertises usable broadcasting configuration.
   bool get supportsBroadcasting =>

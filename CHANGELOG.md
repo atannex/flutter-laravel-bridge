@@ -4,6 +4,49 @@ All notable changes to `flutter_laravel_bridge` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## 2.2.0 - 2026-11-10
+
+Laravel Fortify over the bridge (Bridge 2.2, see `docs/FORTIFY.md`). Pairs with
+`atannex/laravel-flutter-bridge` 2.2.0; wire protocol unchanged (`2.0.0`). Fully backwards
+compatible with 2.1.0: against an older server the new calls simply answer 404.
+
+### Added
+
+- **Feature discovery**: `FortifyFeatures` parsed from `features.fortify` of the handshake (or
+  `GET config` via `AuthManager.refreshFortifyFeatures()`), exposed as `ServerFeatures.fortify`,
+  `ServerInfo.fortify`, `LaravelConnectionManager.fortify`, `AuthManager.fortify` and
+  `Laravel.fortify`. Without the block every Fortify flag is `false` and nothing is blocked.
+- **Password reset with emailed codes**: `forgotPassword(email)` → `PasswordResetRequest`
+  (`channel`, `expiresIn`), `verifyPasswordResetCode(email:, code:)` → reset token,
+  `resetPassword(email:, password:, passwordConfirmation:, resetToken: | token:)`.
+- **Email verification**: `sendEmailVerification()`, `verifyEmail(code)` (updates `currentUser`, the
+  offline user cache and the auth state).
+- **Account**: `updateProfile(fields)` (publishes the updated user), `updatePassword(...,
+  revokeOtherSessions:)`.
+- **Password confirmation**: `confirmPassword(password)` / `confirmedPasswordStatus()` →
+  `PasswordConfirmation` (`confirmed`, `expiresIn`, `confirmedAt`, `isConfirmed()`),
+  `isPasswordConfirmed`, and `runWithPasswordConfirmation(action, askPassword)` which catches a 423,
+  asks for the password, confirms and retries once.
+- **`auth.twoFactor`** (`TwoFactorManager`): `enable()` → `TwoFactorStatus`, `qrCode()` →
+  `TwoFactorQrCode` (`svg`, `url`), `secretKey()`, `confirm(code)` (refreshes the user),
+  `recoveryCodes()`, `regenerateRecoveryCodes()`, `disable()`.
+- **`auth.passkeys`** (`PasskeyManager`): `list()` → `List<Passkey>`, `rename(id, name)`,
+  `delete(id)`.
+- **Feature gating**: a call to a feature the server published as off throws
+  `LaravelFeatureDisabledException` locally, without a request (`register` included).
+- **Typed exceptions**: `LaravelPasswordConfirmationRequiredException` (423),
+  `LaravelCodeException` with `kind` `invalid` / `expired` / `locked` (`code_invalid`,
+  `code_expired`, `code_locked`, `reset_token_invalid`; a `LaravelValidationError`),
+  `LaravelFeatureDisabledException` (404 `feature_disabled`, a `LaravelNotFoundException`),
+  `LaravelAlreadyVerifiedException` (409). New `LaravelErrorCode` constants for every Fortify code.
+- `LaravelClient.patch`, `AuthManager.reloadUser()` and `AuthManager.applyUserPayload()`.
+- `BridgeEndpoints` keys for every Fortify endpoint.
+
+### Unchanged
+
+- Every existing exception mapping, including 403 `feature_disabled` (a bridge feature switched
+  off) → `LaravelPermissionException`, and `AuthState` (verification is a property of the user).
+
 ## 2.1.0 - 2026-11-10
 
 Pairs with `atannex/laravel-flutter-bridge` 2.1.0 (authenticator-app two-step sign-in). Fully

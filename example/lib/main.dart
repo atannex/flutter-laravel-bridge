@@ -208,6 +208,35 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
+  /// Laravel Fortify over the bridge: reset the password with the emailed code.
+  Future<void> _forgotPassword() async {
+    final auth = Laravel.auth<User>();
+    final email = _emailController.text.trim();
+    try {
+      await auth.forgotPassword(email);
+      if (!mounted) return;
+      final code = await _prompt(context, 'Code sent to $email');
+      if (code == null || !mounted) return;
+      final resetToken =
+          await auth.verifyPasswordResetCode(email: email, code: code);
+      if (!mounted) return;
+      final password = await _prompt(context, 'New password', obscure: true);
+      if (password == null) return;
+      await auth.resetPassword(
+        email: email,
+        password: password,
+        passwordConfirmation: password,
+        resetToken: resetToken,
+      );
+      setState(() => _generalError = 'Password changed. Sign in again.');
+    } on LaravelCodeException catch (e) {
+      setState(() => _generalError =
+          e.needsNewCode ? '${e.message} Ask for a new code.' : e.message);
+    } on LaravelException catch (e) {
+      setState(() => _generalError = e.message);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -262,11 +291,38 @@ class _LoginScreenState extends State<LoginScreen> {
                     : const Text('Sign In with Sanctum'),
               ),
             ),
+            if (Laravel.fortify.resetPasswords)
+              TextButton(
+                onPressed: _isLoading ? null : _forgotPassword,
+                child: const Text('Forgot password?'),
+              ),
           ],
         ),
       ),
     );
   }
+}
+
+/// Ask for one line of text (a code or a password); `null` when cancelled.
+Future<String?> _prompt(BuildContext context, String title,
+    {bool obscure = false}) {
+  final controller = TextEditingController();
+  return showDialog<String>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text(title),
+      content: TextField(
+          controller: controller, obscureText: obscure, autofocus: true),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel')),
+        TextButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: const Text('OK')),
+      ],
+    ),
+  );
 }
 
 class DashboardScreen extends StatelessWidget {

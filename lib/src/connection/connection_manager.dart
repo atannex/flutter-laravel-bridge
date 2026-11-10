@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 
 import '../auth/auth_manager.dart';
 import '../auth/auth_state.dart';
+import '../auth/fortify_models.dart';
 import '../auth/token_storage.dart';
 import '../cache/cache_policy.dart';
 import '../client/interceptors/auth_interceptor.dart';
@@ -305,6 +306,14 @@ class LaravelConnectionManager {
 
   /// Latest handshake of the active profile.
   ServerInfo? get serverInfo => _runtime?.serverInfo;
+
+  /// Laravel Fortify features of the active profile's server (FORTIFY.md §3),
+  /// as seen by its [auth] manager. [FortifyFeatures.unavailable] before the
+  /// first handshake or against servers that publish none.
+  FortifyFeatures get fortify =>
+      _runtime?.auth.fortify ??
+      serverInfo?.fortify ??
+      const FortifyFeatures.unavailable();
 
   /// Current server-side session.
   ConnectionSession? get session => _runtime?.session;

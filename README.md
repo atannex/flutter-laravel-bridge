@@ -15,6 +15,7 @@ An enterprise-grade Flutter client package providing reactive authentication, na
 - **FCM Device Registration**: Automatically registers mobile device hardware details and FCM tokens with Laravel backend.
 - **Offline Mutation Queue**: Queues POST/PUT/DELETE requests during network dropouts and automatically replays them when back online.
 - **Connection Management (Bridge v2)**: Multiple backend profiles with per-profile tokens, handshake-driven endpoint discovery, live sessions with heartbeats, remote sign-out, server commands, version policy (426) and ready-made Material 3 screens.
+- **Laravel Fortify over the bridge**: password reset and email verification with 6-digit codes, profile and password updates, password confirmation, authenticator-app setup, recovery codes and passkey management, all through Fortify's own actions and feature switches.
 - **Pagination & UI Widgets**: Ready-to-use `LaravelPaginatedListView` with pull-to-refresh and infinite scrolling, plus reactive `LaravelAuthBuilder` and `LaravelRealtimeBuilder`.
 
 ---
@@ -272,6 +273,100 @@ Future<void> signIn(BuildContext context, String email, String password) async {
 `login` also takes `recoveryCode:` (sent as `recovery_code`) and an `extra` map of additional
 fields, like `register`. `loginWithSocial` accepts `code:` / `recoveryCode:` too. The `user` object
 in the login/register response is whatever your app returns; it is passed to your `userParser`.
+
+### Laravel Fortify
+
+Requires `atannex/laravel-flutter-bridge` 2.2.0 (with or without `laravel/fortify` installed; when it
+is, Fortify's own actions, rules, events and `config/fortify.php` features are used). Protocol:
+[`docs/FORTIFY.md`](https://github.com/atannex/flutter-laravel-bridge/blob/main/docs/FORTIFY.md).
+
+**Discovery.** The handshake says which features are on, so the app only shows what works. Calling a
+feature the server switched off throws `LaravelFeatureDisabledException` without sending anything.
+
+```dart
+final auth = Laravel.auth<User>();
+final fortify = auth.fortify; // also Laravel.fortify / Laravel.connections.fortify
+if (fortify.resetPasswords) showForgotPasswordLink();
+if (fortify.twoFactorAuthentication) showSecuritySettings();
+```
+
+**Forgot password** — the app asks for the code emailed by the server (links in the same email keep
+opening the website):
+
+```dart
+final request = await auth.forgotPassword(email); // always "sent", no account enumeration
+try {
+  final resetToken = await auth.verifyPasswordResetCode(email: email, code: code);
+  await auth.resetPassword(
+    email: email,
+    password: newPassword,
+    passwordConfirmation: newPassword,
+    resetToken: resetToken, // or token: <broker token from the email link>
+  );
+} on LaravelCodeException catch (e) {
+  // e.kind: invalid (try again), expired or locked (e.needsNewCode → forgotPassword again)
+}
+```
+
+**Email verification, profile and password** (signed in):
+
+```dart
+await auth.sendEmailVerification();           // LaravelAlreadyVerifiedException when done already
+final user = await auth.verifyEmail(code);    // currentUser, cached user and stateStream updated
+await auth.updateProfile({'name': name, 'email': email});
+await auth.updatePassword(
+  currentPassword: current,
+  password: next,
+  passwordConfirmation: next,
+  revokeOtherSessions: true,
+);
+```
+
+**Password confirmation.** Two-factor and passkey management need a recent password confirmation
+(Fortify's `confirmPassword` option). Wrap the action; on a 423 the bridge asks, confirms and retries
+once:
+
+```dart
+final status = await auth.runWithPasswordConfirmation(
+  () => auth.twoFactor.enable(),
+  () => askForPassword(context), // returns null when the user cancels
+);
+// Or by hand: await auth.confirmPassword(password); auth.isPasswordConfirmed;
+//             (await auth.confirmedPasswordStatus()).expiresIn
+```
+
+**Authenticator app and recovery codes:**
+
+```dart
+if (status.needsConfirmation) {
+  final qr = await auth.twoFactor.qrCode();   // qr.svg (flutter_svg), qr.url (otpauth://)
+  final secret = await auth.twoFactor.secretKey();
+  await auth.twoFactor.confirm(codeFromApp);  // refreshes the user (two_factor_enabled)
+}
+final codes = await auth.twoFactor.recoveryCodes();
+await auth.twoFactor.regenerateRecoveryCodes();
+await auth.twoFactor.disable();
+```
+
+**Passkeys** are created and used on the website (they need platform credential APIs and a verified
+domain); the app lists, renames and removes them:
+
+```dart
+final passkeys = await auth.passkeys.list();
+await auth.passkeys.rename(passkeys.first.id, 'Work laptop');
+await auth.runWithPasswordConfirmation(
+    () => auth.passkeys.delete(passkeys.first.id), () => askForPassword(context));
+```
+
+| Exception | When |
+|---|---|
+| `LaravelCodeException` (`kind`: invalid / expired / locked) | wrong, old or locked emailed code; used reset token |
+| `LaravelPasswordConfirmationRequiredException` | 423: confirm the password first |
+| `LaravelFeatureDisabledException` | feature off on the server (404 `feature_disabled`, or locally) |
+| `LaravelAlreadyVerifiedException` | 409: email already verified |
+
+The user payload gains `email_verified`, `email_verified_at`, `two_factor_enabled`,
+`two_factor_pending_confirmation` and `passkeys_count`; read them in your `userParser`.
 
 ---
 

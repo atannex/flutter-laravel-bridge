@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'auth/auth_manager.dart';
+import 'auth/fortify_models.dart';
 import 'auth/token_storage.dart';
 import 'client/laravel_client.dart';
 import 'client/laravel_options.dart';
@@ -55,6 +56,10 @@ class Laravel {
 
   /// Handshake information of the active server (null until connected).
   static ServerInfo? get server => _manager?.serverInfo;
+
+  /// Laravel Fortify features of the active server (FORTIFY.md §3).
+  static FortifyFeatures get fortify =>
+      _manager?.fortify ?? const FortifyFeatures.unavailable();
 
   /// Global client instance.
   static LaravelClient get client {

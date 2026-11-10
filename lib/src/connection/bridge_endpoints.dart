@@ -20,6 +20,31 @@ class BridgeEndpoints {
   static const String authTwoFactorVerify = 'auth.2fa.verify';
   static const String authMe = 'auth.me';
   static const String authLogout = 'auth.logout';
+
+  // Laravel Fortify over the bridge (FORTIFY.md §2).
+  static const String authForgotPassword = 'auth.password.forgot';
+  static const String authResetPasswordVerifyCode = 'auth.password.verify_code';
+  static const String authResetPassword = 'auth.password.reset';
+  static const String authEmailVerificationNotification = 'auth.email.send';
+  static const String authEmailVerify = 'auth.email.verify';
+  static const String authProfileInformation = 'auth.user.profile';
+  static const String authUserPassword = 'auth.user.password';
+  static const String authConfirmPassword = 'auth.user.confirm_password';
+  static const String authConfirmedPasswordStatus =
+      'auth.user.confirmed_password_status';
+  static const String authTwoFactorEnable = 'auth.two_factor.enable';
+  static const String authTwoFactorDisable = 'auth.two_factor.disable';
+  static const String authTwoFactorQrCode = 'auth.two_factor.qr_code';
+  static const String authTwoFactorSecretKey = 'auth.two_factor.secret_key';
+  static const String authTwoFactorConfirm = 'auth.two_factor.confirm';
+  static const String authTwoFactorRecoveryCodes =
+      'auth.two_factor.recovery_codes';
+  static const String authTwoFactorRegenerateRecoveryCodes =
+      'auth.two_factor.regenerate_recovery_codes';
+  static const String authPasskeys = 'auth.passkeys.index';
+  static const String authPasskeyUpdate = 'auth.passkeys.update';
+  static const String authPasskeyDestroy = 'auth.passkeys.destroy';
+
   static const String devicesRegister = 'devices.register';
   static const String devicesUnregister = 'devices.unregister';
   static const String broadcastingAuth = 'broadcasting.auth';
@@ -43,6 +68,25 @@ class BridgeEndpoints {
     authTwoFactorVerify: 'auth/2fa/verify',
     authMe: 'auth/me',
     authLogout: 'auth/logout',
+    authForgotPassword: 'auth/forgot-password',
+    authResetPasswordVerifyCode: 'auth/reset-password/verify-code',
+    authResetPassword: 'auth/reset-password',
+    authEmailVerificationNotification: 'auth/email/verification-notification',
+    authEmailVerify: 'auth/email/verify',
+    authProfileInformation: 'auth/user/profile-information',
+    authUserPassword: 'auth/user/password',
+    authConfirmPassword: 'auth/user/confirm-password',
+    authConfirmedPasswordStatus: 'auth/user/confirmed-password-status',
+    authTwoFactorEnable: 'auth/user/two-factor-authentication',
+    authTwoFactorDisable: 'auth/user/two-factor-authentication',
+    authTwoFactorQrCode: 'auth/user/two-factor-qr-code',
+    authTwoFactorSecretKey: 'auth/user/two-factor-secret-key',
+    authTwoFactorConfirm: 'auth/user/confirmed-two-factor-authentication',
+    authTwoFactorRecoveryCodes: 'auth/user/two-factor-recovery-codes',
+    authTwoFactorRegenerateRecoveryCodes: 'auth/user/two-factor-recovery-codes',
+    authPasskeys: 'auth/user/passkeys',
+    authPasskeyUpdate: 'auth/user/passkeys/{passkey}',
+    authPasskeyDestroy: 'auth/user/passkeys/{passkey}',
     devicesRegister: 'devices/register',
     devicesUnregister: 'devices/{device}',
     broadcastingAuth: 'broadcasting/auth',
