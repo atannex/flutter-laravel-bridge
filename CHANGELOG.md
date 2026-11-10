@@ -4,6 +4,31 @@ All notable changes to `flutter_laravel_bridge` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## 2.1.0 - 2026-11-10
+
+Pairs with `atannex/laravel-flutter-bridge` 2.1.0 (authenticator-app two-step sign-in). Fully
+backwards compatible with 2.0.0.
+
+### Added
+
+- **Two-step sign-in**: `AuthManager.login` accepts `code`, `recoveryCode` (sent as `code` /
+  `recovery_code`) and an `extra` map merged into the request like `register`.
+  `loginWithSocial` accepts `code` / `recoveryCode`.
+- `LaravelTwoFactorRequiredException` (extends `LaravelValidationError`) with `invalid`, thrown for
+  422 `two_factor_required` / `two_factor_invalid`. During a challenge `AuthManager` emits
+  `Unauthenticated` (not `AuthError`), stores no tokens and rethrows so the UI can ask for the code.
+- `LaravelErrorCode.twoFactorRequired`, `LaravelErrorCode.twoFactorInvalid` and
+  `LaravelErrorCode.isTwoFactorChallenge`.
+- **Plain JSON endpoints**: `ApiResponse.fromJson` treats a map without the envelope as `data`;
+  `LaravelClient.get/post/put/delete` accept top-level JSON arrays. New `ApiResponse.isEnvelope`,
+  `ApiResponse.raw`, `ApiResponse.fromBody`.
+- `LaravelClient.getJson` returns a raw JSON object and honours cache policies like `get`.
+
+### Changed
+
+- Responses with a `success` or `data` key (the bridge envelope, Laravel API resources) are parsed
+  exactly as before; empty bodies still have no data.
+
 ## 2.0.0 - 2026-11-09
 
 Bridge protocol v2: connection management between Flutter and Laravel. Requires

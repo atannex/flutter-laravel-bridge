@@ -244,6 +244,35 @@ class RootView extends StatelessWidget {
 }
 ```
 
+### Two-step sign-in (authenticator apps)
+
+Requires `atannex/laravel-flutter-bridge` 2.1.0. When an account has an authenticator app turned on,
+the first `login` call throws `LaravelTwoFactorRequiredException` (a `LaravelValidationError`, so
+existing handlers still catch it). The auth state goes back to `Unauthenticated` (not `AuthError`)
+and no tokens are stored. Ask for the code and call `login` again with `code:` (or
+`recoveryCode:`). A wrong code throws the same exception with `invalid == true`.
+
+```dart
+Future<void> signIn(BuildContext context, String email, String password) async {
+  final auth = Laravel.auth<User>();
+  String? code;
+  while (true) {
+    try {
+      await auth.login(email: email, password: password, code: code);
+      return; // Authenticated
+    } on LaravelTwoFactorRequiredException catch (e) {
+      // e.invalid: the previous code was wrong. e.first('code') has the server message.
+      code = await askForCode(context, error: e.invalid ? e.message : null);
+      if (code == null) return; // user cancelled
+    }
+  }
+}
+```
+
+`login` also takes `recoveryCode:` (sent as `recovery_code`) and an `extra` map of additional
+fields, like `register`. `loginWithSocial` accepts `code:` / `recoveryCode:` too. The `user` object
+in the login/register response is whatever your app returns; it is passed to your `userParser`.
+
 ---
 
 ## 📡 Real-Time Broadcasting (Reverb / Pusher)
@@ -273,6 +302,31 @@ Laravel.echo
     .joining((member) => print('Joined: $member'))
     .leaving((member) => print('Left: $member'));
 ```
+
+---
+
+## 🧾 Plain JSON endpoints
+
+Not every Laravel endpoint returns the bridge envelope (`success`, `message`, `data`, `meta`).
+`get`, `post`, `put` and `delete` also accept plain JSON: a JSON object without the envelope keys,
+or a top-level JSON array, becomes `response.data` (with `success == true` and an empty `message`).
+A body counts as wrapped when it has `success` or `data` (the bridge envelope, or a Laravel API resource), so `data` is the inner value exactly as in 2.0.0.
+
+```dart
+final todos = await Laravel.client.get<List<dynamic>>('api/todos'); // returns [...]
+print(todos.data?.length);
+
+// Raw JSON object, returned exactly as the server sent it. Cache policies work like get().
+final stats = await Laravel.client.getJson(
+  'api/stats',
+  queryParameters: {'range': '7d'},
+  cachePolicy: CachePolicy.cacheFirst,
+  cacheTtl: const Duration(minutes: 1),
+);
+print(stats['visits']);
+```
+
+`getJson` throws a `LaravelException` when the body is not a JSON object.
 
 ---
 

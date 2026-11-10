@@ -16,6 +16,16 @@ class LaravelErrorCode {
   static const String tooManyRequests = 'too_many_requests';
   static const String maintenance = 'maintenance';
 
+  /// Login needs an authenticator-app code (or a recovery code).
+  static const String twoFactorRequired = 'two_factor_required';
+
+  /// The authenticator-app code or recovery code sent with login was wrong.
+  static const String twoFactorInvalid = 'two_factor_invalid';
+
+  /// Whether [code] is one of the two-step sign-in challenge codes.
+  static bool isTwoFactorChallenge(String? code) =>
+      code == twoFactorRequired || code == twoFactorInvalid;
+
   /// Codes that must never trigger an access-token refresh.
   static const Set<String> noRefresh = {
     invalidRefreshToken,
@@ -85,6 +95,37 @@ class LaravelValidationError extends LaravelException {
   @override
   String toString() =>
       'LaravelValidationError: $message (Fields: ${fieldErrors.keys.join(', ')})';
+}
+
+/// Thrown when login needs an authenticator-app code (422 `two_factor_required`)
+/// or the code that was sent is wrong (422 `two_factor_invalid`).
+///
+/// It extends [LaravelValidationError], so existing `on LaravelValidationError`
+/// handlers keep working; the message for the code field is in `first('code')`.
+/// Ask the user for the code, then call `login` again with `code:` (or
+/// `recoveryCode:`).
+class LaravelTwoFactorRequiredException extends LaravelValidationError {
+  /// `true` when a code was sent but rejected (`two_factor_invalid`), `false`
+  /// when the server is asking for one (`two_factor_required`).
+  final bool invalid;
+
+  LaravelTwoFactorRequiredException({
+    super.message = 'Enter the code from your authenticator app.',
+    super.fieldErrors = const {},
+    super.statusCode = 422,
+    super.responseData,
+    this.invalid = false,
+    String? errorCode,
+  }) : super(
+          errorCode: errorCode ??
+              (invalid
+                  ? LaravelErrorCode.twoFactorInvalid
+                  : LaravelErrorCode.twoFactorRequired),
+        );
+
+  @override
+  String toString() =>
+      'LaravelTwoFactorRequiredException: $message (invalid: $invalid)';
 }
 
 /// Thrown when an unauthenticated request is rejected (HTTP 401).

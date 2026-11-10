@@ -123,6 +123,20 @@ class ErrorInterceptor extends Interceptor {
           }
         });
       }
+      final payload = data['data'];
+      final twoFactorFlag = payload is Map && payload['two_factor'] == true;
+      if (LaravelErrorCode.isTwoFactorChallenge(code) ||
+          (code == null && twoFactorFlag)) {
+        final invalid = code == LaravelErrorCode.twoFactorInvalid;
+        return LaravelTwoFactorRequiredException(
+          message: extractMessage(invalid
+              ? 'The two-factor code is invalid.'
+              : 'Enter the code from your authenticator app.'),
+          fieldErrors: fieldErrors,
+          responseData: data,
+          invalid: invalid,
+        );
+      }
       return LaravelValidationError(
         message: extractMessage('The given data was invalid.'),
         fieldErrors: fieldErrors,

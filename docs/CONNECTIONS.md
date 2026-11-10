@@ -84,6 +84,8 @@ Protocol-level failures add `meta.error_code`. Clients must branch on the code, 
 | 403 | `connection_revoked` | `X-Flutter-Connection-Id` points to a revoked session | **no refresh retry**; clear tokens; status `revoked` |
 | 404 | `connection_not_found` | unknown connection id on connection routes | reconnect (new session) |
 | 422 | `validation_failed` | validation error; `errors` = `{field: [messages]}` | surface field errors |
+| 422 | `two_factor_required` | `auth/login` or `auth/social` for an account with an authenticator app, sent without `code` / `recovery_code`; `data` = `{"two_factor": true}`, `errors` = `{"code": ["…"]}`; no tokens issued | ask for the authenticator-app code (or a recovery code) and resend the same request with `code` / `recovery_code` |
+| 422 | `two_factor_invalid` | `code` / `recovery_code` was wrong (same shape as `two_factor_required`) | show the error on the code field and let the user retry |
 | 426 | `upgrade_required` | `X-Flutter-App-Version` < min version | status `upgradeRequired`; `errors` = `{current_version, min_version, latest_version, update_url}` |
 | 429 | `too_many_requests` | throttled; `Retry-After` header | back off |
 | 503 | `maintenance` | app in maintenance mode | back off / show banner |
@@ -290,6 +292,19 @@ when broadcasting is on — pushed instantly as event `BridgeCommand` on
 * When `X-Flutter-Connection-Id` is present on login/refresh the tokens are bound to that session and the
   session's `user_id` is set. `single_session_per_device` revokes earlier tokens of the same device.
 * `POST auth/logout` revokes the current access token and its refresh token(s).
+* `POST auth/login` (and `POST auth/social`) accept optional `code` (6-digit authenticator-app code,
+  whitespace ignored) and `recovery_code`. For accounts with an authenticator app the first attempt
+  answers 422 `two_factor_required`; the client resends the same body plus `code` or `recovery_code`.
+  A recovery code works once. Tokens are only issued after the check passes. Controlled by
+  `flutter-bridge.auth.two_factor_challenge` (`auto` = when Laravel Fortify is installed and the user
+  has a (confirmed) two-factor secret). This is separate from the email one-time-code endpoints
+  `auth/2fa/send-otp` / `auth/2fa/verify`, which are unchanged.
+* Servers may plug in their own sign-in (`auth.authenticate_using`, or Fortify's
+  `authenticateUsing`), sign-up (`auth.register_using`, or Fortify's `CreatesNewUsers`) and `user`
+  shape (`auth.user_presenter`). With a custom sign-in the `email` field is no longer required by the
+  bridge (the app's authenticator reads its own fields); `password` still is. With a custom sign-up
+  every request field is passed to the app's action, which applies its own validation (422
+  `validation_failed`).
 
 ---
 

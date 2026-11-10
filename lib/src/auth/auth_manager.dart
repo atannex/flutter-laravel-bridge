@@ -117,15 +117,25 @@ class AuthManager<TUser> {
   }
 
   /// Authenticate with email and password.
+  ///
+  /// When the account uses an authenticator app, the first attempt throws a
+  /// [LaravelTwoFactorRequiredException] (state goes back to
+  /// [Unauthenticated]); call [login] again with the same credentials plus
+  /// [code] (or [recoveryCode]). A wrong code throws the same exception with
+  /// `invalid == true`. [extra] fields are sent too (explicit fields win).
   Future<TUser> login({
     required String email,
     required String password,
     String? deviceName,
     String? fcmToken,
+    String? code,
+    String? recoveryCode,
+    Map<String, dynamic>? extra,
   }) {
     return _authenticate(
       client.endpoint(BridgeEndpoints.authLogin),
       {
+        if (extra != null) ...extra,
         'email': email,
         'password': password,
         if (deviceName != null) 'device_name': deviceName,
@@ -134,6 +144,8 @@ class AuthManager<TUser> {
         if (fcmToken != null) 'fcm_token': fcmToken,
         if (client.options.platform != null)
           'platform': client.options.platform,
+        if (code != null) 'code': code,
+        if (recoveryCode != null) 'recovery_code': recoveryCode,
       },
     );
   }
@@ -164,12 +176,17 @@ class AuthManager<TUser> {
   }
 
   /// Authenticate using third-party mobile OAuth credentials (Apple, Google, GitHub).
+  ///
+  /// Supports the same two-step challenge as [login] via [code] /
+  /// [recoveryCode].
   Future<TUser> loginWithSocial({
     required String provider,
     required String token,
     String? email,
     String? name,
     String? deviceName,
+    String? code,
+    String? recoveryCode,
   }) {
     return _authenticate(
       client.endpoint(BridgeEndpoints.authSocial),
@@ -183,6 +200,8 @@ class AuthManager<TUser> {
           'device_id': client.options.deviceId,
         if (client.options.platform != null)
           'platform': client.options.platform,
+        if (code != null) 'code': code,
+        if (recoveryCode != null) 'recovery_code': recoveryCode,
       },
     );
   }
@@ -249,6 +268,12 @@ class AuthManager<TUser> {
       _currentUser = user;
       _setState(Authenticated<TUser>(user: user, accessToken: accessToken));
       return user;
+    } on LaravelTwoFactorRequiredException {
+      // Not an error: the server wants a code. Nothing was persisted (the
+      // challenge arrives before any token); go back to Unauthenticated so the
+      // UI can ask for the code and call login again.
+      _setState(const Unauthenticated());
+      rethrow;
     } catch (e) {
       _setState(AuthError(
           message: e is LaravelException ? e.message : e.toString(), cause: e));

@@ -138,6 +138,9 @@ class LaravelClient {
   }
 
   /// Perform a GET request with optional caching policy and query builder.
+  ///
+  /// The body may be the bridge envelope or plain JSON (an object or a list),
+  /// see [ApiResponse.fromBody].
   Future<ApiResponse<T>> get<T>(
     String path, {
     Map<String, dynamic>? queryParameters,
@@ -145,6 +148,53 @@ class LaravelClient {
     CachePolicy cachePolicy = CachePolicy.networkOnly,
     Duration cacheTtl = const Duration(minutes: 5),
     T Function(dynamic json)? fromJson,
+    Options? requestOptions,
+  }) async {
+    final body = await _getBody(
+      path,
+      queryParameters: queryParameters,
+      query: query,
+      cachePolicy: cachePolicy,
+      cacheTtl: cacheTtl,
+      requestOptions: requestOptions,
+    );
+    return ApiResponse<T>.fromBody(body, fromJson);
+  }
+
+  /// GET a plain JSON object and return the decoded body as is (no envelope
+  /// unwrapping). Meant for ordinary Laravel endpoints that return raw JSON.
+  /// Honours [cachePolicy] exactly like [get].
+  ///
+  /// Throws a [LaravelException] when the body is not a JSON object.
+  Future<Map<String, dynamic>> getJson(
+    String path, {
+    Map<String, dynamic>? queryParameters,
+    LaravelQuery? query,
+    CachePolicy cachePolicy = CachePolicy.networkOnly,
+    Duration cacheTtl = const Duration(minutes: 5),
+    Options? requestOptions,
+  }) async {
+    final body = await _getBody(
+      path,
+      queryParameters: queryParameters,
+      query: query,
+      cachePolicy: cachePolicy,
+      cacheTtl: cacheTtl,
+      requestOptions: requestOptions,
+    );
+    if (body is Map<String, dynamic>) return body;
+    if (body is Map) return parseBridgeMap(body);
+    throw LaravelException(
+        message: 'Expected a JSON object from $path, got ${body.runtimeType}.');
+  }
+
+  /// GET [path] and return the decoded body, applying [cachePolicy].
+  Future<dynamic> _getBody(
+    String path, {
+    Map<String, dynamic>? queryParameters,
+    LaravelQuery? query,
+    required CachePolicy cachePolicy,
+    required Duration cacheTtl,
     Options? requestOptions,
   }) async {
     final mergedParams = <String, dynamic>{
@@ -162,10 +212,7 @@ class LaravelClient {
     if (cachePolicy == CachePolicy.cacheFirst ||
         cachePolicy == CachePolicy.cacheOnly) {
       final cached = _cacheManager.get(cacheKey);
-      if (cached != null) {
-        return ApiResponse<T>.fromJson(
-            cached as Map<String, dynamic>, fromJson);
-      }
+      if (cached != null) return cached;
       if (cachePolicy == CachePolicy.cacheOnly) {
         throw const LaravelException(
             message: 'Cached data not found for requested resource.');
@@ -173,7 +220,7 @@ class LaravelClient {
     }
 
     try {
-      final response = await _dio.get<Map<String, dynamic>>(
+      final response = await _dio.get<dynamic>(
         path,
         queryParameters: mergedParams.isEmpty ? null : mergedParams,
         options: requestOptions,
@@ -186,16 +233,13 @@ class LaravelClient {
         _cacheManager.put(cacheKey, rawData, cacheTtl);
       }
 
-      return ApiResponse<T>.fromJson(rawData, fromJson);
+      return rawData;
     } on DioException catch (e) {
       // 2. If network request failed but networkFirst was requested, fallback to cache
       if (e.error is LaravelNetworkException &&
           cachePolicy == CachePolicy.networkFirst) {
         final cached = _cacheManager.get(cacheKey);
-        if (cached != null) {
-          return ApiResponse<T>.fromJson(
-              cached as Map<String, dynamic>, fromJson);
-        }
+        if (cached != null) return cached;
       }
       _throwTyped(e);
     }
@@ -211,15 +255,14 @@ class LaravelClient {
     Options? requestOptions,
   }) async {
     try {
-      final response = await _dio.post<Map<String, dynamic>>(
+      final response = await _dio.post<dynamic>(
         path,
         data: data,
         queryParameters: queryParameters,
         options: requestOptions,
       );
 
-      return ApiResponse<T>.fromJson(
-          response.data ?? <String, dynamic>{}, fromJson);
+      return ApiResponse<T>.fromBody(response.data, fromJson);
     } on DioException catch (e) {
       if (queueIfOffline && e.error is LaravelNetworkException) {
         _enqueueMutation('POST', path, data, queryParameters);
@@ -238,15 +281,14 @@ class LaravelClient {
     Options? requestOptions,
   }) async {
     try {
-      final response = await _dio.put<Map<String, dynamic>>(
+      final response = await _dio.put<dynamic>(
         path,
         data: data,
         queryParameters: queryParameters,
         options: requestOptions,
       );
 
-      return ApiResponse<T>.fromJson(
-          response.data ?? <String, dynamic>{}, fromJson);
+      return ApiResponse<T>.fromBody(response.data, fromJson);
     } on DioException catch (e) {
       if (queueIfOffline && e.error is LaravelNetworkException) {
         _enqueueMutation('PUT', path, data, queryParameters);
@@ -265,15 +307,14 @@ class LaravelClient {
     Options? requestOptions,
   }) async {
     try {
-      final response = await _dio.delete<Map<String, dynamic>>(
+      final response = await _dio.delete<dynamic>(
         path,
         data: data,
         queryParameters: queryParameters,
         options: requestOptions,
       );
 
-      return ApiResponse<T>.fromJson(
-          response.data ?? <String, dynamic>{}, fromJson);
+      return ApiResponse<T>.fromBody(response.data, fromJson);
     } on DioException catch (e) {
       if (queueIfOffline && e.error is LaravelNetworkException) {
         _enqueueMutation('DELETE', path, data, queryParameters);
