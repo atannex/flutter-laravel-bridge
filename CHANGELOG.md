@@ -23,6 +23,10 @@ backwards compatible with 2.0.0.
   `LaravelClient.get/post/put/delete` accept top-level JSON arrays. New `ApiResponse.isEnvelope`,
   `ApiResponse.raw`, `ApiResponse.fromBody`.
 - `LaravelClient.getJson` returns a raw JSON object and honours cache policies like `get`.
+- **Signed in while offline**: the signed-in user is remembered per connection profile (in the
+  `storage:` / new `userStore:` store), so an app that starts without a connection restores the
+  session instead of showing the user signed out. The cached user is cleared with the session.
+  `AuthManager.attachUserCache` for standalone use.
 
 ### Changed
 

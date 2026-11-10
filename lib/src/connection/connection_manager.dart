@@ -135,6 +135,14 @@ class LaravelConnectionManager {
   /// Persists each profile's response cache (namespaced per profile), if set.
   final BridgeKeyValueStore? cacheStore;
 
+  /// Persists each profile's last signed-in user (namespaced per profile), so
+  /// a session survives an offline start. Defaults to `storage`.
+  final BridgeKeyValueStore? userStore;
+
+  /// Storage key of [profileId]'s cached user in [userStore].
+  static String userStorageKeyFor(String profileId) =>
+      '${AuthManager.defaultUserCacheKey}:$profileId';
+
   /// [OfflineQueue.maxRetries] of each profile's queue.
   final int offlineQueueMaxRetries;
 
@@ -198,6 +206,7 @@ class LaravelConnectionManager {
     BridgeKeyValueStore? storage,
     BridgeKeyValueStore? offlineQueueStore,
     BridgeKeyValueStore? cacheStore,
+    BridgeKeyValueStore? userStore,
     this.offlineQueueMaxRetries = 5,
     this.cacheMaxEntries = 200,
   })  : store = store ??
@@ -206,6 +215,7 @@ class LaravelConnectionManager {
                 : InMemoryConnectionStore()),
         offlineQueueStore = offlineQueueStore ?? storage,
         cacheStore = cacheStore ?? storage,
+        userStore = userStore ?? storage,
         _rootTokenStorage = tokenStorage ??
             (storage != null
                 ? DelegateTokenStorage.fromStore(storage)
@@ -437,6 +447,7 @@ class LaravelConnectionManager {
     }
     await _deletePersisted(offlineQueueStore, OfflineQueue.storageKeyFor(id));
     await _deletePersisted(cacheStore, CacheManager.storageKeyFor(id));
+    await _deletePersisted(userStore, userStorageKeyFor(id));
     _emitConnections();
 
     if (wasActive) {
@@ -801,6 +812,10 @@ class LaravelConnectionManager {
           proactiveRefresh: enableTimers,
           clock: _clock,
         );
+    final users = userStore;
+    if (users != null) {
+      rt.auth.attachUserCache(users, key: userStorageKeyFor(profile.id));
+    }
     rt.authSubscription = rt.auth.stateStream.listen((authState) {
       if (rt != _runtime) return;
       _syncCommandChannel(rt);

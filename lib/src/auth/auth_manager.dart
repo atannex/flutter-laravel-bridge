@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import '../client/interceptors/auth_interceptor.dart';
@@ -6,6 +7,7 @@ import '../client/laravel_client.dart';
 import '../connection/bridge_endpoints.dart';
 import '../connection/bridge_ids.dart';
 import '../exceptions/laravel_exception.dart';
+import '../storage/key_value_store.dart';
 import 'auth_state.dart';
 import 'token_storage.dart';
 
@@ -26,6 +28,12 @@ class AuthManager<TUser> {
   final Duration refreshMargin;
 
   final DateTime Function() _clock;
+
+  BridgeKeyValueStore? _userCache;
+  String _userCacheKey = defaultUserCacheKey;
+
+  /// Storage key of the cached user when [attachUserCache] is given no key.
+  static const String defaultUserCacheKey = 'flutter_laravel_user';
 
   final _stateController = StreamController<AuthState>.broadcast();
   AuthState _currentState = const Unauthenticated();
@@ -74,6 +82,39 @@ class AuthManager<TUser> {
     _stateController.add(_currentState);
   }
 
+  /// Remember the signed-in user in [store] under [key], so a session can be
+  /// restored while the server is unreachable (e.g. the app starts offline).
+  /// The cached user is written on every sign-in and profile fetch and
+  /// removed with the session.
+  void attachUserCache(BridgeKeyValueStore store,
+      {String key = defaultUserCacheKey}) {
+    _userCache = store;
+    _userCacheKey = key;
+  }
+
+  Future<void> _cacheUser(Map<String, dynamic> raw) async {
+    final cache = _userCache;
+    if (cache == null) return;
+    try {
+      await cache.write(_userCacheKey, jsonEncode(raw));
+    } catch (e) {
+      debugPrint('AuthManager failed to cache the user: $e');
+    }
+  }
+
+  Future<TUser?> _cachedUser() async {
+    final cache = _userCache;
+    if (cache == null) return null;
+    try {
+      final raw = await cache.read(_userCacheKey);
+      if (raw == null || raw.isEmpty) return null;
+      return userParser(parseBridgeMap(jsonDecode(raw)));
+    } catch (e) {
+      debugPrint('AuthManager ignored an unreadable cached user: $e');
+      return null;
+    }
+  }
+
   static Options _publicAuthOptions({bool sendBearer = false}) => Options(
         extra: {
           AuthInterceptor.skipAuthRefreshExtra: true,
@@ -110,8 +151,15 @@ class AuthManager<TUser> {
       await clearSession();
     } catch (e) {
       debugPrint('AuthManager session restoration failed: $e');
-      // Keep the tokens: the server may simply be unreachable.
-      if (_currentUser == null) _setState(const Unauthenticated());
+      // Keep the tokens: the server may simply be unreachable. Restore the
+      // last known user so the app stays signed in while offline.
+      final cached = _currentUser ?? await _cachedUser();
+      if (cached != null) {
+        _currentUser = cached;
+        _setState(Authenticated<TUser>(user: cached, accessToken: token));
+        return cached;
+      }
+      _setState(const Unauthenticated());
     }
     return null;
   }
@@ -252,7 +300,8 @@ class AuthManager<TUser> {
         throw const LaravelException(
             message: 'Authentication response did not include a user.');
       }
-      final user = userParser(parseBridgeMap(rawUser));
+      final userJson = parseBridgeMap(rawUser);
+      final user = userParser(userJson);
       final accessToken = await _persistAuthorization(payload['authorization']);
 
       if (accessToken == null) {
@@ -266,6 +315,7 @@ class AuthManager<TUser> {
       }
 
       _currentUser = user;
+      await _cacheUser(userJson);
       _setState(Authenticated<TUser>(user: user, accessToken: accessToken));
       return user;
     } on LaravelTwoFactorRequiredException {
@@ -336,7 +386,10 @@ class AuthManager<TUser> {
     );
     final userMap = response.data?['user'];
     if (userMap is Map) {
-      return userParser(parseBridgeMap(userMap));
+      final json = parseBridgeMap(userMap);
+      final user = userParser(json);
+      await _cacheUser(json);
+      return user;
     }
     return null;
   }
@@ -425,6 +478,11 @@ class AuthManager<TUser> {
       await tokenStorage.clear();
     } catch (e) {
       debugPrint('AuthManager failed to clear token storage: $e');
+    }
+    try {
+      await _userCache?.delete(_userCacheKey);
+    } catch (e) {
+      debugPrint('AuthManager failed to clear the cached user: $e');
     }
     _currentUser = null;
     _setState(const Unauthenticated());
