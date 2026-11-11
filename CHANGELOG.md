@@ -16,17 +16,25 @@ compatible with 2.1.0: against an older server the new calls simply answer 404.
   `GET config` via `AuthManager.refreshFortifyFeatures()`), exposed as `ServerFeatures.fortify`,
   `ServerInfo.fortify`, `LaravelConnectionManager.fortify`, `AuthManager.fortify` and
   `Laravel.fortify`. Without the block every Fortify flag is `false` and nothing is blocked.
+  `fortifyListenable` (`ValueListenable<FortifyFeatures>`) on `AuthManager` and
+  `LaravelConnectionManager` (survives profile switches) notifies when the features change;
+  `FortifyFeatures` has value equality. `LaravelClient.serverInfoListenable` notifies on every new
+  handshake.
 - **Password reset with emailed codes**: `forgotPassword(email)` → `PasswordResetRequest`
   (`channel`, `expiresIn`), `verifyPasswordResetCode(email:, code:)` → reset token,
   `resetPassword(email:, password:, passwordConfirmation:, resetToken: | token:)`.
-- **Email verification**: `sendEmailVerification()`, `verifyEmail(code)` (updates `currentUser`, the
-  offline user cache and the auth state).
+- **Email verification**: `sendEmailVerification()` → `VerificationCodeRequest` (`sent`,
+  `expiresIn`), `verifyEmail(code)` (updates `currentUser`, the offline user cache and the auth
+  state), and `emailVerificationRequired` — the server's `email_verification_required` after
+  `register` / `updateProfile`, cleared by `verifyEmail` and sign-out.
 - **Account**: `updateProfile(fields)` (publishes the updated user), `updatePassword(...,
   revokeOtherSessions:)`.
 - **Password confirmation**: `confirmPassword(password)` / `confirmedPasswordStatus()` →
   `PasswordConfirmation` (`confirmed`, `expiresIn`, `confirmedAt`, `isConfirmed()`),
   `isPasswordConfirmed`, and `runWithPasswordConfirmation(action, askPassword)` which catches a 423,
-  asks for the password, confirms and retries once.
+  asks for the password, confirms and retries once; `runWithPasswordPrompt(action, prompt)` hands the
+  prompt a `confirm(password)` function so the UI keeps its sheet open on a wrong password and shows
+  the error inline (`PasswordConfirmer` / `PasswordConfirmationPrompt` typedefs).
 - **`auth.twoFactor`** (`TwoFactorManager`): `enable()` → `TwoFactorStatus`, `qrCode()` →
   `TwoFactorQrCode` (`svg`, `url`), `secretKey()`, `confirm(code)` (refreshes the user),
   `recoveryCodes()`, `regenerateRecoveryCodes()`, `disable()`.
@@ -41,6 +49,10 @@ compatible with 2.1.0: against an older server the new calls simply answer 404.
   `LaravelAlreadyVerifiedException` (409). New `LaravelErrorCode` constants for every Fortify code.
 - `LaravelClient.patch`, `AuthManager.reloadUser()` and `AuthManager.applyUserPayload()`.
 - `BridgeEndpoints` keys for every Fortify endpoint.
+
+### Notes
+
+- A 429 without a `Retry-After` header gives `LaravelRateLimitException.retryAfter == null`.
 
 ### Unchanged
 

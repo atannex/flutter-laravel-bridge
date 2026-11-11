@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import '../auth/token_storage.dart';
 import '../cache/cache_policy.dart';
 import '../connection/bridge_ids.dart';
@@ -27,9 +28,15 @@ class LaravelClient {
   late final ConnectionInterceptor _connectionInterceptor;
   late final AuthInterceptor _authInterceptor;
 
+  final ValueNotifier<ServerInfo?> _serverInfo;
+
   /// Latest handshake of the server this client talks to. Set by
   /// [LaravelConnectionManager]; used to resolve endpoint paths.
-  ServerInfo? serverInfo;
+  ServerInfo? get serverInfo => _serverInfo.value;
+  set serverInfo(ServerInfo? info) => _serverInfo.value = info;
+
+  /// Notifies whenever [serverInfo] is replaced (a new handshake).
+  ValueListenable<ServerInfo?> get serverInfoListenable => _serverInfo;
 
   Dio get rawDio => _dio;
   OfflineQueue get offlineQueue => _offlineQueue;
@@ -57,11 +64,12 @@ class LaravelClient {
     void Function(LaravelException exception, RequestOptions request)?
         onException,
     DateTime Function()? clock,
-    this.serverInfo,
+    ServerInfo? serverInfo,
     OfflineQueue? offlineQueue,
     CacheManager? cacheManager,
   })  : tokenStorage = tokenStorage ?? InMemoryTokenStorage(),
         _dio = customDio ?? Dio(buildBaseOptions(options)),
+        _serverInfo = ValueNotifier<ServerInfo?>(serverInfo),
         _offlineQueue = offlineQueue ?? OfflineQueue(),
         _cacheManager = cacheManager ?? CacheManager() {
     _setupInterceptors(

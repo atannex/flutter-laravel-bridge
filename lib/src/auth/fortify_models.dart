@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import '../connection/bridge_ids.dart';
 
 /// `features.fortify.codes`: shape of the one-time codes emailed by the bridge.
@@ -186,6 +188,26 @@ class FortifyFeatures {
         'codes': codes.toJson(),
       };
 
+  /// Two feature sets are equal when they publish the same flags (so a
+  /// listener of `fortifyListenable` only hears about real changes).
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is FortifyFeatures &&
+          other.advertised == advertised &&
+          other._signature == _signature;
+
+  @override
+  int get hashCode => Object.hash(advertised, _signature);
+
+  String get _signature {
+    try {
+      return jsonEncode(toJson());
+    } catch (_) {
+      return toJson().toString();
+    }
+  }
+
   @override
   String toString() => 'FortifyFeatures(${advertised ? toJson() : 'none'})';
 }
@@ -219,6 +241,30 @@ class PasswordResetRequest {
       expiresIn: ttl != null ? Duration(seconds: ttl) : null,
     );
   }
+}
+
+/// Result of `sendEmailVerification`: a verification code was emailed.
+class VerificationCodeRequest {
+  /// Always `true` when the call succeeded.
+  final bool sent;
+
+  /// Lifetime of the emailed code (`expires_in`), when the server sends it.
+  /// Fall back to `FortifyFeatures.codes.ttl` when `null`.
+  final Duration? expiresIn;
+
+  const VerificationCodeRequest({this.sent = true, this.expiresIn});
+
+  factory VerificationCodeRequest.fromJson(Map<String, dynamic> json) {
+    final ttl = parseBridgeInt(json['expires_in']);
+    return VerificationCodeRequest(
+      sent: parseBridgeBool(json['sent']) ?? true,
+      expiresIn: ttl != null ? Duration(seconds: ttl) : null,
+    );
+  }
+
+  @override
+  String toString() =>
+      'VerificationCodeRequest(sent: $sent, expiresIn: $expiresIn)';
 }
 
 /// State of the password confirmation of the current token.

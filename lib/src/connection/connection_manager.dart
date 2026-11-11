@@ -62,6 +62,7 @@ class _Runtime {
   EchoOptions? echoOptions;
   String? commandChannel;
   StreamSubscription<AuthState>? authSubscription;
+  VoidCallback? fortifyListener;
   int heartbeatInterval = 30;
 
   _Runtime(this.profile, this.tokenStorage);
@@ -314,6 +315,20 @@ class LaravelConnectionManager {
       _runtime?.auth.fortify ??
       serverInfo?.fortify ??
       const FortifyFeatures.unavailable();
+
+  /// [fortify] as a listenable that survives profile switches: notifies when
+  /// the active server's features change (handshake, [refreshServerInfo],
+  /// `auth.refreshFortifyFeatures()`, switching or removing the profile).
+  ValueListenable<FortifyFeatures> get fortifyListenable => _fortifyNotifier;
+
+  final ValueNotifier<FortifyFeatures> _fortifyNotifier =
+      ValueNotifier<FortifyFeatures>(const FortifyFeatures.unavailable());
+
+  void _syncFortify() {
+    if (_disposed) return;
+    final next = fortify;
+    if (_fortifyNotifier.value != next) _fortifyNotifier.value = next;
+  }
 
   /// Current server-side session.
   ConnectionSession? get session => _runtime?.session;
@@ -840,7 +855,15 @@ class LaravelConnectionManager {
       rt.echo = _createEcho(profile.echoOptions!, rt.client);
     }
 
+    void onFortify() {
+      if (rt == _runtime) _syncFortify();
+    }
+
+    rt.fortifyListener = onFortify;
+    rt.auth.fortifyListenable.addListener(onFortify);
+
     _runtime = rt;
+    _syncFortify();
     _emit(LaravelConnectionState(profile: profile));
     _runtimeController.add(null);
     return rt;
@@ -874,9 +897,14 @@ class LaravelConnectionManager {
     _generation++;
     _stopTimers();
     rt.authSubscription?.cancel();
+    final fortifyListener = rt.fortifyListener;
+    if (fortifyListener != null) {
+      rt.auth.fortifyListenable.removeListener(fortifyListener);
+    }
     rt.echo?.dispose();
     rt.auth.dispose();
     rt.client.close();
+    _syncFortify();
   }
 
   LaravelOptions _optionsFor(LaravelConnection profile) {
@@ -1460,5 +1488,6 @@ class LaravelConnectionManager {
     await _connectionsController.close();
     await _commandsController.close();
     await _runtimeController.close();
+    _fortifyNotifier.dispose();
   }
 }

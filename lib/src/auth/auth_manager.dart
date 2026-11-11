@@ -14,6 +14,20 @@ import 'passkey_manager.dart';
 import 'token_storage.dart';
 import 'two_factor_manager.dart';
 
+/// Confirms the signed-in user's password with the server (see
+/// [AuthManager.runWithPasswordPrompt]): resolves to `true` once confirmed,
+/// `false` for an empty password (nothing is sent); a wrong password throws
+/// the server's [LaravelValidationError] (`password_invalid`), other failures
+/// their usual exception.
+typedef PasswordConfirmer = Future<bool> Function(String password);
+
+/// A password prompt driven by the UI (see
+/// [AuthManager.runWithPasswordPrompt]): ask for the password, call
+/// `confirm` (as often as needed), show its errors inline and resolve to
+/// `true` once a call to `confirm` succeeded, `false` when the user cancels.
+typedef PasswordConfirmationPrompt = Future<bool> Function(
+    PasswordConfirmer confirm);
+
 /// Reactive authentication manager handling logins, token rotation, and user sessions.
 class AuthManager<TUser> {
   final LaravelClient client;
@@ -48,6 +62,9 @@ class AuthManager<TUser> {
   bool _disposed = false;
   FortifyFeatures? _fortifyOverride;
   PasswordConfirmation? _passwordConfirmation;
+  bool _emailVerificationRequired = false;
+  late final ValueNotifier<FortifyFeatures> _fortifyNotifier =
+      ValueNotifier<FortifyFeatures>(fortify);
   late final TwoFactorManager<TUser> twoFactor = TwoFactorManager<TUser>(this);
   late final PasskeyManager passkeys = PasskeyManager(this);
 
@@ -87,6 +104,7 @@ class AuthManager<TUser> {
   })  : tokenStorage = tokenStorage ?? client.tokenStorage,
         _clock = clock ?? DateTime.now {
     _stateController.add(_currentState);
+    client.serverInfoListenable.addListener(_syncFortify);
   }
 
   /// Remember the signed-in user in [store] under [key], so a session can be
@@ -206,6 +224,9 @@ class AuthManager<TUser> {
   }
 
   /// Register a new user account.
+  ///
+  /// Afterwards [emailVerificationRequired] tells whether the new address
+  /// must be verified (the server already emailed a code then).
   Future<TUser> register({
     required String name,
     required String email,
@@ -303,6 +324,7 @@ class AuthManager<TUser> {
       );
 
       final payload = response.data ?? const <String, dynamic>{};
+      _readEmailVerificationRequired(payload);
       final rawUser = payload['user'];
       if (rawUser is! Map) {
         throw const LaravelException(
@@ -494,6 +516,7 @@ class AuthManager<TUser> {
     }
     _currentUser = null;
     _passwordConfirmation = null;
+    _emailVerificationRequired = false;
     _setState(const Unauthenticated());
   }
 
@@ -539,7 +562,22 @@ class AuthManager<TUser> {
 
   /// Replace the discovered [fortify] features (`null` goes back to the
   /// handshake of the client's server).
-  set fortify(FortifyFeatures? features) => _fortifyOverride = features;
+  set fortify(FortifyFeatures? features) {
+    _fortifyOverride = features;
+    _syncFortify();
+  }
+
+  /// [fortify] as a listenable: notifies when the features actually change
+  /// (a new handshake of the client's server, [refreshFortifyFeatures] or
+  /// the [fortify] setter). Use it with a `ValueListenableBuilder` to show
+  /// only what the server offers.
+  ValueListenable<FortifyFeatures> get fortifyListenable => _fortifyNotifier;
+
+  void _syncFortify() {
+    if (_disposed) return;
+    final next = fortify;
+    if (_fortifyNotifier.value != next) _fortifyNotifier.value = next;
+  }
 
   /// Read `features.fortify` from `GET config` (useful without a
   /// [LaravelConnectionManager], which already reads it from the handshake).
@@ -555,6 +593,7 @@ class AuthManager<TUser> {
         registrationFallback:
             parseBridgeBool(features['registration']) ?? fortify.registration);
     _fortifyOverride = parsed;
+    _syncFortify();
     return parsed;
   }
 
@@ -584,6 +623,20 @@ class AuthManager<TUser> {
   /// Latest known password confirmation of this session (from
   /// [confirmPassword] / [confirmedPasswordStatus]); `null` when unknown.
   PasswordConfirmation? get passwordConfirmation => _passwordConfirmation;
+
+  /// Whether the signed-in user's email address still has to be verified, as
+  /// answered by the server's `email_verification_required` to the latest
+  /// [register] or [updateProfile] (the server emails a code itself when
+  /// the address is new). Turns `false` after [verifyEmail], on sign-out,
+  /// and when the server does not send the flag (older bridges: check the
+  /// user's `email_verified` instead).
+  bool get emailVerificationRequired => _emailVerificationRequired;
+
+  void _readEmailVerificationRequired(dynamic payload) {
+    final map = parseBridgeMap(payload);
+    _emailVerificationRequired =
+        parseBridgeBool(map['email_verification_required']) ?? false;
+  }
 
   /// Whether the password was confirmed recently enough, judged locally from
   /// the last [confirmPassword] / [confirmedPasswordStatus] answer.
@@ -653,13 +706,15 @@ class AuthManager<TUser> {
     );
   }
 
-  /// Email a verification code to the signed-in user. Throws
+  /// Email a verification code to the signed-in user; the result carries
+  /// the code's lifetime (`expiresIn`). Throws
   /// [LaravelAlreadyVerifiedException] when the address is already verified.
-  Future<void> sendEmailVerification() async {
+  Future<VerificationCodeRequest> sendEmailVerification() async {
     requireFortifyFeature('email_verification');
-    await client.post<dynamic>(
+    final response = await client.post<dynamic>(
       client.endpoint(BridgeEndpoints.authEmailVerificationNotification),
     );
+    return VerificationCodeRequest.fromJson(parseBridgeMap(response.data));
   }
 
   /// Verify the signed-in user's email address with the emailed [code].
@@ -670,18 +725,26 @@ class AuthManager<TUser> {
       client.endpoint(BridgeEndpoints.authEmailVerify),
       data: {'code': code},
     );
-    return await _userFromResponse(response.data);
+    final user = await _userFromResponse(response.data);
+    _emailVerificationRequired = false;
+    return user;
   }
 
   /// Update the signed-in user's profile with the fields of Fortify's
   /// `UpdatesUserProfileInformation` (`name`, `email`, …). Updates
-  /// [currentUser], the offline user cache and [stateStream].
+  /// [currentUser], the offline user cache and [stateStream], and
+  /// [emailVerificationRequired] (after an email change the server emails a
+  /// code to the new address).
   Future<TUser> updateProfile(Map<String, dynamic> fields) async {
     requireFortifyFeature('update_profile_information');
     final response = await client.put<dynamic>(
       client.endpoint(BridgeEndpoints.authProfileInformation),
       data: fields,
     );
+    final data = parseBridgeMap(response.data);
+    if (data.containsKey('email_verification_required')) {
+      _readEmailVerificationRequired(data);
+    }
     return await _userFromResponse(response.data);
   }
 
@@ -762,6 +825,42 @@ class AuthManager<TUser> {
     }
   }
 
+  /// Like [runWithPasswordConfirmation], with a prompt that stays open until
+  /// the password is right: on a 423 [prompt] receives a `confirm` function
+  /// ([PasswordConfirmer]) to call with what the user typed — as often as
+  /// needed, showing its errors (a wrong password throws the server's
+  /// `password_invalid` validation error) inline — and resolves to `true`
+  /// once confirmed. [action] then runs once more. When [prompt] resolves to
+  /// `false` (cancelled) the original
+  /// [LaravelPasswordConfirmationRequiredException] is rethrown.
+  ///
+  /// ```dart
+  /// await auth.runWithPasswordPrompt(
+  ///   () => auth.twoFactor.enable(),
+  ///   (confirm) => showPasswordSheet(context, onSubmit: confirm),
+  /// );
+  /// ```
+  Future<T> runWithPasswordPrompt<T>(
+    Future<T> Function() action,
+    PasswordConfirmationPrompt prompt,
+  ) async {
+    try {
+      return await action();
+    } on LaravelPasswordConfirmationRequiredException {
+      _passwordConfirmation = null;
+      final confirmed = await prompt(_confirmForPrompt);
+      if (!confirmed) rethrow;
+      return await action();
+    }
+  }
+
+  Future<bool> _confirmForPrompt(String password) async {
+    if (password.isEmpty) return false;
+    // A 2xx answer means the server accepted the password.
+    await confirmPassword(password);
+    return true;
+  }
+
   /// Forget the known password confirmation (after a 423).
   void markPasswordUnconfirmed() => _passwordConfirmation = null;
 
@@ -815,6 +914,8 @@ class AuthManager<TUser> {
 
   void dispose() {
     _disposed = true;
+    client.serverInfoListenable.removeListener(_syncFortify);
+    _fortifyNotifier.dispose();
     _refreshTimer?.cancel();
     _stateController.close();
   }

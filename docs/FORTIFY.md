@@ -111,21 +111,28 @@ On `AuthManager` (and passed through by `LaravelConnectionManager`):
 ```dart
 // discovery
 FortifyFeatures get fortify;                      // from handshake/config
+ValueListenable<FortifyFeatures> get fortifyListenable; // notifies on change
+                                                  // (also on LaravelConnectionManager,
+                                                  //  surviving profile switches)
 // guest
 Future<TUser> login({...existing, String? code, String? recoveryCode});
-Future<TUser> register({...existing});
+Future<TUser> register({...existing});        // then: emailVerificationRequired
+bool get emailVerificationRequired;          // data.email_verification_required
 Future<PasswordResetRequest> forgotPassword(String email);
 Future<String> verifyPasswordResetCode({required String email, required String code}); // reset token
 Future<void> resetPassword({required String email, required String password,
     required String passwordConfirmation, String? resetToken, String? token});
 // signed in
-Future<void> sendEmailVerification();
+Future<VerificationCodeRequest> sendEmailVerification(); // {sent, expiresIn}
 Future<TUser> verifyEmail(String code);
 Future<TUser> updateProfile(Map<String, dynamic> fields);
 Future<void> updatePassword({required String currentPassword, required String password,
     required String passwordConfirmation, bool revokeOtherSessions = false});
 Future<PasswordConfirmation> confirmPassword(String password);
 Future<PasswordConfirmation> confirmedPasswordStatus();
+Future<T> runWithPasswordConfirmation<T>(action, Future<String?> Function() askPassword);
+Future<T> runWithPasswordPrompt<T>(action,
+    Future<bool> Function(Future<bool> Function(String password) confirm) prompt);
 TwoFactorManager get twoFactor; // enable(), qrCode() -> TwoFactorQrCode{svg,url},
                                 // secretKey(), confirm(code), recoveryCodes(),
                                 // regenerateRecoveryCodes(), disable()
@@ -200,5 +207,29 @@ All of them are additive and tolerant.
   from `expires_in`. A 423 from two-factor / passkey calls forgets the
   locally known confirmation. `runWithPasswordConfirmation` retries exactly
   once and rethrows the 423 when the prompt returns `null`.
+* **Email verification required.** `email_verification_required` of the
+  `register` and `profile-information` responses is kept as
+  `AuthManager.emailVerificationRequired` (also read, as `false` when
+  absent, on every sign-in response). It turns `false` after a successful
+  `verifyEmail` and on sign-out. Against servers that do not send it, it
+  stays `false`: check the user's `email_verified` instead.
+* **Verification code lifetime.** `sendEmailVerification()` returns
+  `VerificationCodeRequest{sent, expiresIn}` from `{sent, expires_in}`;
+  `expiresIn` is `null` when not sent (fall back to `codes.ttl`).
+* **Password prompt.** `runWithPasswordPrompt` hands the prompt a
+  `confirm(password)` function: `true` once the server accepted the password
+  (any 2xx), `false` for an empty password (nothing sent); a wrong password
+  throws the `password_invalid` validation error so the prompt can show it
+  and stay open. The action is retried once after the prompt resolves to
+  `true`; `false` rethrows the 423.
+* **Feature changes.** `fortifyListenable` (on `AuthManager` and
+  `LaravelConnectionManager`) notifies only when the features differ by value
+  (`FortifyFeatures` has value equality): after a handshake /
+  `refreshServerInfo()`, `refreshFortifyFeatures()`, the `fortify` setter,
+  and — on the connection manager — a profile switch or removal.
+* **Rate limits.** A 429 maps to `LaravelRateLimitException`; `retryAfter`
+  comes from the `Retry-After` header and is `null` when the server sends
+  none (e.g. a limiter that only answers 429). Clients should then pick
+  their own delay.
 * **Token rotation.** If `PUT auth/user/password` ever returns an
   `authorization` object the client stores it; today it is not required.

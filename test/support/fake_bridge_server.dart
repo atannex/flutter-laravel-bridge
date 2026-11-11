@@ -691,6 +691,35 @@ class FakeBridgeServer implements HttpClientAdapter {
   ResponseBody? _fortifyRoute(RecordedRequest request, String route,
       String method, Map<String, dynamic> body, int? userId) {
     // ---- guest ----
+    if (route == 'auth/register' && method == 'POST') {
+      if (!_on('registration')) return _disabled('registration');
+      final email = body['email']?.toString() ?? '';
+      if (users.containsKey(email)) {
+        return _error(422, 'The email has already been taken.',
+            code: 'validation_failed',
+            errors: {
+              'email': ['The email has already been taken.']
+            });
+      }
+      final user = <String, dynamic>{
+        'id': users.length + 100,
+        'name': body['name'],
+        'email': email,
+        'password': body['password'],
+        'email_verified_at': null,
+        'passkeys': <Map<String, dynamic>>[],
+      };
+      users[email] = user;
+      final verify = _on('email_verification');
+      if (verify) _issueCode('verify', email);
+      final connectionId = request.header('X-Flutter-Connection-Id');
+      return _ok({
+        'user': _publicUser(user),
+        'authorization': _issue(user['id'] as int, connectionId),
+        'email_verification_required': verify,
+      });
+    }
+
     if (route == 'auth/forgot-password' && method == 'POST') {
       if (!_on('reset_passwords')) return _disabled('reset_passwords');
       final email = body['email']?.toString() ?? '';

@@ -1094,4 +1094,211 @@ void main() {
           LaravelErrorCode.passwordConfirmationRequired);
     });
   });
+
+  group('2.2 API additions', () {
+    test('register exposes email_verification_required', () async {
+      final h = await _Harness.create();
+      addTearDown(h.dispose);
+      expect(h.auth.emailVerificationRequired, isFalse);
+      final user = await h.auth.register(
+          name: 'Carol', email: 'c@example.com', password: 'secret') as Map;
+      expect(user['email_verified'], isFalse);
+      expect(h.auth.emailVerificationRequired, isTrue);
+      expect(h.server.lastCode('c@example.com', 'verify'), isNotNull);
+
+      await h.auth.verifyEmail(h.server.lastCode('c@example.com', 'verify')!);
+      expect(h.auth.emailVerificationRequired, isFalse);
+    });
+
+    test('register without email verification → flag false', () async {
+      final h = await _Harness.create(
+          configure: (s) => s.fortify['email_verification'] = false);
+      addTearDown(h.dispose);
+      await h.auth
+          .register(name: 'Dan', email: 'd@example.com', password: 'secret');
+      expect(h.auth.emailVerificationRequired, isFalse);
+    });
+
+    test('updateProfile updates the flag; sign-out clears it', () async {
+      final h = await _Harness.create();
+      addTearDown(h.dispose);
+      await h.login();
+      await h.auth.updateProfile({'name': 'Alice', 'email': 'a@example.com'});
+      expect(h.auth.emailVerificationRequired, isFalse);
+      await h.auth.updateProfile({'name': 'Alice', 'email': 'alice@new.test'});
+      expect(h.auth.emailVerificationRequired, isTrue);
+      await h.auth.logout();
+      expect(h.auth.emailVerificationRequired, isFalse);
+    });
+
+    test('sendEmailVerification returns the code lifetime', () async {
+      final h = await _Harness.create(
+          configure: (s) => s.fortify['codes'] = {'length': 6, 'ttl': 300});
+      addTearDown(h.dispose);
+      await h.login('b@example.com');
+      final request = await h.auth.sendEmailVerification();
+      expect(request.sent, isTrue);
+      expect(request.expiresIn, const Duration(minutes: 5));
+      expect(VerificationCodeRequest.fromJson(const {}).expiresIn, isNull);
+      expect(VerificationCodeRequest.fromJson(const {}).sent, isTrue);
+    });
+
+    group('runWithPasswordPrompt', () {
+      late _Harness h;
+      setUp(() async {
+        h = await _Harness.create();
+        await h.login();
+      });
+      tearDown(() => h.dispose());
+
+      test('the prompt stays open on a wrong password', () async {
+        final errors = <Object>[];
+        var prompts = 0;
+        final status = await h.auth.runWithPasswordPrompt(
+          () => h.auth.twoFactor.enable(),
+          (confirm) async {
+            prompts++;
+            for (final attempt in ['', 'wrong', 'secret']) {
+              try {
+                if (await confirm(attempt)) return true;
+                errors.add('empty');
+              } on LaravelValidationError catch (e) {
+                errors.add(e.errorCode!);
+              }
+            }
+            return false;
+          },
+        );
+        expect(status.enabled, isTrue);
+        expect(prompts, 1);
+        expect(errors, ['empty', LaravelErrorCode.passwordInvalid]);
+        // The empty password was never sent.
+        expect(h.server.requestsTo('auth/user/confirm-password'), hasLength(2));
+        expect(
+            h.server.requestsTo('auth/user/two-factor-authentication',
+                method: 'POST'),
+            hasLength(2));
+        expect(h.auth.isPasswordConfirmed, isTrue);
+      });
+
+      test('cancelling rethrows the 423 without confirming', () async {
+        final error =
+            await _throws<LaravelPasswordConfirmationRequiredException>(() =>
+                h.auth.runWithPasswordPrompt(
+                    () => h.auth.twoFactor.enable(), (_) async => false));
+        expect(error.statusCode, 423);
+        expect(h.server.requestsTo('auth/user/confirm-password'), isEmpty);
+      });
+
+      test('no prompt when already confirmed', () async {
+        await h.auth.confirmPassword('secret');
+        var prompts = 0;
+        await h.auth.runWithPasswordPrompt(() => h.auth.twoFactor.enable(),
+            (_) async {
+          prompts++;
+          return true;
+        });
+        expect(prompts, 0);
+      });
+    });
+
+    test('fortifyListenable follows handshakes and config refreshes', () async {
+      final h = await _Harness.create(connect: false);
+      addTearDown(h.dispose);
+      final managerValues = <FortifyFeatures>[];
+      h.manager.fortifyListenable.addListener(
+          () => managerValues.add(h.manager.fortifyListenable.value));
+      final auth = h.auth;
+      final authValues = <FortifyFeatures>[];
+      auth.fortifyListenable
+          .addListener(() => authValues.add(auth.fortifyListenable.value));
+      expect(h.manager.fortifyListenable.value.advertised, isFalse);
+
+      await h.manager.connect();
+      expect(managerValues, hasLength(1));
+      expect(managerValues.last.passkeys, isTrue);
+      expect(authValues.single, managerValues.single);
+      expect(auth.fortifyListenable.value, h.manager.fortify);
+
+      // Same flags again: no notification.
+      await h.manager.refreshServerInfo();
+      expect(managerValues, hasLength(1));
+
+      h.server.fortify['passkeys'] = false;
+      await h.manager.refreshServerInfo();
+      expect(managerValues, hasLength(2));
+      expect(managerValues.last.passkeys, isFalse);
+
+      h.server.fortify['update_passwords'] = false;
+      await auth.refreshFortifyFeatures();
+      expect(managerValues.last.updatePasswords, isFalse);
+      expect(authValues.last.updatePasswords, isFalse);
+
+      auth.fortify = const FortifyFeatures.unavailable();
+      expect(managerValues.last.advertised, isFalse);
+    });
+
+    test('fortifyListenable follows profile switches', () async {
+      final alpha = FakeBridgeServer(name: 'Alpha');
+      final beta = FakeBridgeServer(name: 'Beta')
+        ..fortify['two_factor_authentication'] = false;
+      const betaProfile = LaravelConnection(
+        id: 'beta',
+        name: 'Beta',
+        baseUrl: 'https://beta.test',
+        appKey: 'fba_test',
+      );
+      final manager = LaravelConnectionManager(
+        options: const LaravelOptions(
+          baseUrl: 'https://unused.test',
+          appVersion: '1.0.0',
+          platform: 'android',
+          deviceId: 'device-1',
+          enableLogging: false,
+        ),
+        store:
+            InMemoryConnectionStore(connections: const [_profile, betaProfile]),
+        tokenStorage: InMemoryTokenStorage(),
+        httpClientAdapterFactory: (profile) =>
+            profile.id == 'beta' ? beta : alpha,
+        enableTimers: false,
+        random: Random(1),
+      );
+      addTearDown(manager.dispose);
+      await manager.load();
+      await manager.connect();
+      expect(manager.fortifyListenable.value.twoFactorAuthentication, isTrue);
+
+      final seen = <FortifyFeatures>[];
+      manager.fortifyListenable
+          .addListener(() => seen.add(manager.fortifyListenable.value));
+      await manager.switchTo('beta');
+      expect(manager.fortifyListenable.value.twoFactorAuthentication, isFalse);
+      expect(manager.fortifyListenable.value, manager.fortify);
+      expect(seen, isNotEmpty);
+    });
+
+    test('FortifyFeatures equality is by value', () {
+      final a = FortifyFeatures.fromJson({'installed': true, 'passkeys': true});
+      final b = FortifyFeatures.fromJson({'installed': true, 'passkeys': true});
+      final c = FortifyFeatures.fromJson({'installed': true});
+      expect(a, b);
+      expect(a.hashCode, b.hashCode);
+      expect(a == c, isFalse);
+      expect(const FortifyFeatures.unavailable(),
+          const FortifyFeatures.unavailable());
+      expect(
+          const FortifyFeatures.unavailable() == FortifyFeatures.fromJson({}),
+          isFalse);
+    });
+
+    test('a 429 without Retry-After leaves retryAfter null', () async {
+      final h =
+          await _Harness.create(configure: (s) => s.forgotPasswordLimit = 0);
+      addTearDown(h.dispose);
+      final error = await _throws<LaravelRateLimitException>(
+          () => h.auth.forgotPassword('a@example.com'));
+      expect(error.retryAfter, isNull);
+    });
+  });
 }

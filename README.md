@@ -288,6 +288,12 @@ final auth = Laravel.auth<User>();
 final fortify = auth.fortify; // also Laravel.fortify / Laravel.connections.fortify
 if (fortify.resetPasswords) showForgotPasswordLink();
 if (fortify.twoFactorAuthentication) showSecuritySettings();
+
+// Rebuild when the handshake arrives or the user switches servers:
+ValueListenableBuilder<FortifyFeatures>(
+  valueListenable: Laravel.connections.fortifyListenable, // or auth.fortifyListenable
+  builder: (context, fortify, _) => fortify.passkeys ? passkeysTile : const SizedBox(),
+);
 ```
 
 **Forgot password** — the app asks for the code emailed by the server (links in the same email keep
@@ -311,9 +317,13 @@ try {
 **Email verification, profile and password** (signed in):
 
 ```dart
-await auth.sendEmailVerification();           // LaravelAlreadyVerifiedException when done already
+await auth.register(name: name, email: email, password: password);
+if (auth.emailVerificationRequired) openCodeScreen(); // the server already emailed a code
+final sent = await auth.sendEmailVerification(); // LaravelAlreadyVerifiedException when done already
+showExpiry(sent.expiresIn ?? auth.fortify.codes.ttl);
 final user = await auth.verifyEmail(code);    // currentUser, cached user and stateStream updated
 await auth.updateProfile({'name': name, 'email': email});
+if (auth.emailVerificationRequired) openCodeScreen(); // new address: a code was emailed
 await auth.updatePassword(
   currentPassword: current,
   password: next,
@@ -330,6 +340,13 @@ once:
 final status = await auth.runWithPasswordConfirmation(
   () => auth.twoFactor.enable(),
   () => askForPassword(context), // returns null when the user cancels
+);
+// Keep the sheet open on a wrong password: the prompt confirms by itself.
+await auth.runWithPasswordPrompt(
+  () => auth.twoFactor.enable(),
+  (confirm) => showPasswordSheet(context, onSubmit: confirm),
+  // onSubmit: try { if (await confirm(text)) Navigator.pop(context, true); }
+  //           on LaravelValidationError catch (e) { showInline(e.message); }
 );
 // Or by hand: await auth.confirmPassword(password); auth.isPasswordConfirmed;
 //             (await auth.confirmedPasswordStatus()).expiresIn
@@ -364,6 +381,7 @@ await auth.runWithPasswordConfirmation(
 | `LaravelPasswordConfirmationRequiredException` | 423: confirm the password first |
 | `LaravelFeatureDisabledException` | feature off on the server (404 `feature_disabled`, or locally) |
 | `LaravelAlreadyVerifiedException` | 409: email already verified |
+| `LaravelRateLimitException` | 429; `retryAfter` is `null` when the server sends no `Retry-After` |
 
 The user payload gains `email_verified`, `email_verified_at`, `two_factor_enabled`,
 `two_factor_pending_confirmation` and `passkeys_count`; read them in your `userParser`.
