@@ -1,6 +1,4 @@
 # pub.dev upload rules. A .pubignore replaces .gitignore for publishing, so it repeats it.
-# The shared protocol docs live on GitHub (linked from the README), not in the pub archive.
-/docs/
 
 # Miscellaneous
 *.class

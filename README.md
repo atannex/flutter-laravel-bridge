@@ -193,9 +193,7 @@ The package also includes:
 - **401 errors after login:** ensure the Laravel `User` model uses `HasApiTokens` and protected routes use `auth:sanctum`.
 - **Realtime connection fails:** check that Reverb is running and its host, port, and scheme are configured correctly.
 
-## Documentation
+## Links
 
 - [Laravel backend package](https://github.com/atannex/laravel-flutter-bridge)
 - [Package on pub.dev](https://pub.dev/packages/flutter_laravel_bridge)
-- [Connection protocol](https://github.com/atannex/flutter-laravel-bridge/blob/main/docs/CONNECTIONS.md)
-- [Fortify integration](https://github.com/atannex/flutter-laravel-bridge/blob/main/docs/FORTIFY.md)

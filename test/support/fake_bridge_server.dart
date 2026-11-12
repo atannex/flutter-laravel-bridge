@@ -113,7 +113,7 @@ class _FakeResetToken {
 typedef FakeRouteHandler = FutureOr<ResponseBody> Function(
     RecordedRequest request, FakeBridgeServer server);
 
-/// In-memory implementation of the bridge wire contract (docs/CONNECTIONS.md),
+/// In-memory implementation of the bridge wire contract,
 /// plugged into Dio as an [HttpClientAdapter].
 class FakeBridgeServer implements HttpClientAdapter {
   final String name;
@@ -164,7 +164,7 @@ class FakeBridgeServer implements HttpClientAdapter {
     },
   };
 
-  // --- Fortify over the bridge (docs/FORTIFY.md) ---------------------------
+  // --- Fortify over the bridge ---------------------------------------------
 
   /// `features.fortify` published by the handshake and `GET config`; every
   /// endpoint of a feature switched off here answers 404 `feature_disabled`.
